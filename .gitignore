@@ -1,0 +1,15 @@
+.DS_Store
+*.log
+
+# Local diagnostics produced while debugging Zotero reader behavior.
+zai-diag*.js
+zai-diag*.json
+preferences.js
+preferences.css
+
+# Keep the current public install package only.
+dist/*
+!dist/
+!dist/zotero-ai-reading-0.4.115.xpi
+
+node_modules/

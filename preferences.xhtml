@@ -1,0 +1,110 @@
+<vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml">
+  <groupbox style="max-width: 780px; padding: 16px 18px 18px;">
+    <html:style>
+      .zai-title { font-size: 21px; margin: 2px 0 4px; }
+      .zai-sec { font-size: 15px; font-weight: 700; color: #2e7dd1;
+        margin: 18px 0 9px; padding-bottom: 5px;
+        border-bottom: 1px solid rgba(128, 128, 128, .25); }
+      .zai-hint { color: #777; font-size: 12px; line-height: 1.55; margin: 3px 0 10px; max-width: 54em; }
+      .zai-row { margin: 0 0 10px; }
+      .zai-label { min-width: 8.5em; }
+      .zai-input { width: 34em; }
+      .zai-small-input { width: 9em; }
+      .zai-fixed { box-sizing: border-box; width: 42em; margin: 0 0 10px; padding: 10px 12px;
+        border: 1px solid rgba(128, 128, 128, .35); border-radius: 4px;
+        background: rgba(128, 128, 128, .10); white-space: pre-wrap;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .zai-prompt { width: 42em; min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .zai-command { width: 42em; min-height: 54px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .zai-wide-check { margin-top: 4px; }
+    </html:style>
+
+    <label>
+      <html:h2 class="zai-title">Zotero AI Reading</html:h2>
+    </label>
+    <html:div class="zai-hint">
+      可生成 Google Drive 链接、直接粘贴 PDF 文件，或粘贴 Zotero 已索引的 PDF 文本。
+    </html:div>
+
+    <html:div class="zai-sec">① 网页 AI</html:div>
+
+    <hbox align="center" class="zai-row">
+      <label value="网页 AI：" class="zai-label"/>
+      <menulist native="true" preference="extensions.zotero-ai-reading.aiPreset" style="min-width: 26em;">
+        <menupopup>
+          <menuitem value="chatgpt" label="ChatGPT（https://chatgpt.com）"/>
+          <menuitem value="claude" label="Claude（https://claude.ai）"/>
+          <menuitem value="grok" label="Grok（https://grok.com）"/>
+          <menuitem value="gemini" label="Gemini（https://gemini.google.com/app）"/>
+          <menuitem value="chatglm" label="ChatGLM（https://chatglm.cn）"/>
+          <menuitem value="deepseek" label="DeepSeek（https://chat.deepseek.com）"/>
+          <menuitem value="custom" label="自定义 URL（使用下面输入框）"/>
+        </menupopup>
+      </menulist>
+    </hbox>
+
+    <hbox align="center" class="zai-row">
+      <label value="自定义 URL：" class="zai-label"/>
+      <html:input type="text" class="zai-input"
+        preference="extensions.zotero-ai-reading.aiURL"/>
+    </hbox>
+    <html:div class="zai-hint">
+      选择预设时会使用预设地址；选择“自定义 URL”时才使用这里输入的地址。
+    </html:div>
+
+    <hbox align="center" class="zai-row">
+      <label value="传输模式：" class="zai-label"/>
+      <menulist native="true" preference="extensions.zotero-ai-reading.transferMode" style="min-width: 26em;">
+        <menupopup>
+          <menuitem value="gdrive" label="提示词 + Google Drive 可访问链接（推荐）"/>
+          <menuitem value="file" label="提示词 + PDF 文件（直接粘贴文件）"/>
+          <menuitem value="text" label="提示词 + PDF 文本"/>
+        </menupopup>
+      </menulist>
+    </hbox>
+
+    <hbox align="center" class="zai-row">
+      <label value="" class="zai-label"/>
+      <checkbox native="true" label="复制后打开网页 AI"
+        preference="extensions.zotero-ai-reading.openAIPage"/>
+      <checkbox native="true" class="zai-wide-check" label="阅读器右侧面板打开（实验：自适应分栏，正文不左右跳动）"
+        preference="extensions.zotero-ai-reading.openInReaderPane"/>
+      <checkbox native="true" label="打开网页后自动粘贴"
+        preference="extensions.zotero-ai-reading.autoPaste"/>
+    </hbox>
+
+    <hbox align="center" class="zai-row">
+      <label value="粘贴延迟 ms：" class="zai-label"/>
+      <html:input type="number" min="1000" step="500" class="zai-small-input"
+        preference="extensions.zotero-ai-reading.pasteDelayMs"/>
+      <label value="最多文本字符：" style="margin-left: 24px; min-width: 8em;"/>
+      <html:input type="number" min="1000" step="1000" class="zai-small-input"
+        preference="extensions.zotero-ai-reading.maxTextChars"/>
+    </hbox>
+
+    <html:div class="zai-sec">② 固定提示</html:div>
+    <html:div class="zai-hint">
+      这部分在 Google Drive 链接或 PDF 文件模式下由插件固定生成，用户不可修改。PDF 文本模式会粘贴 Zotero 已索引的文本。
+    </html:div>
+    <html:pre class="zai-fixed">Google Drive:
+请以这个 Google Drive PDF 链接作为主要来源：
+
+{gdriveLink}
+
+PDF 文件:
+请以我刚上传的 PDF 文件作为主要来源。</html:pre>
+
+    <html:div class="zai-sec">③ 追加粘贴内容（可选）</html:div>
+    <html:div class="zai-hint">
+      这里的内容会粘贴在固定提示之后。需要总结任务、阅读框架或你的研究方向时，写在这里。可用占位符：{pdfText}, {title}, {authors}, {year}, {doi}。
+    </html:div>
+    <html:textarea id="zai-extra-prompt" rows="7" class="zai-prompt"
+      preference="extensions.zotero-ai-reading.extraPrompt"></html:textarea>
+
+    <hbox align="center" style="margin-top: 8px;">
+      <button label="清空追加内容"
+        oncommand="Zotero.ZoteroAIReading &amp;&amp; Zotero.ZoteroAIReading.resetPromptUI(document)"/>
+    </hbox>
+  </groupbox>
+</vbox>

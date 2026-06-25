@@ -1,0 +1,18 @@
+{
+  "manifest_version": 2,
+  "name": "Zotero AI Reading",
+  "version": "0.4.115",
+  "description": "Send the selected Zotero item's PDF and a saved prompt to a configurable web AI chat.",
+  "homepage_url": "https://github.com/zhonghaoyi/zotero-ai-reading",
+  "icons": {
+    "48": "icons/icon.png",
+    "96": "icons/icon.png"
+  },
+  "applications": {
+    "zotero": {
+      "id": "zoteroaireading@zhonghaoyi.dev",
+      "strict_min_version": "7.0",
+      "strict_max_version": "10.*"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+pref("extensions.zotero-ai-reading.aiURL", "https://chatgpt.com");
+pref("extensions.zotero-ai-reading.aiPreset", "chatgpt");
+pref("extensions.zotero-ai-reading.aiPresetMigrated", false);
+pref("extensions.zotero-ai-reading.transferMode", "gdrive");
+pref("extensions.zotero-ai-reading.openAIPage", true);
+pref("extensions.zotero-ai-reading.openInReaderPane", false);
+pref("extensions.zotero-ai-reading.readerPaneWidth", 520);
+pref("extensions.zotero-ai-reading.readerConversationURLs", "{}");
+pref("extensions.zotero-ai-reading.autoPaste", true);
+pref("extensions.zotero-ai-reading.pasteDelayMs", 2500);
+pref("extensions.zotero-ai-reading.maxTextChars", 120000);
+pref("extensions.zotero-ai-reading.prompt", "请以这个 Google Drive PDF 链接作为主要来源：\n\n{gdriveLink}");
+pref("extensions.zotero-ai-reading.extraPrompt", "");
