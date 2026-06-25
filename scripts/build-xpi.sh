@@ -10,7 +10,7 @@ mkdir -p "$DIST_DIR"
 cd "$ROOT_DIR"
 rm -f "$XPI_PATH"
 
-zip -r "$XPI_PATH" \
+zip -X -r "$XPI_PATH" \
   manifest.json \
   bootstrap.js \
   prefs.js \

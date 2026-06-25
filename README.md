@@ -67,9 +67,9 @@ PDF 文件模式依赖目标网页 AI 是否接受粘贴文件。如果需要跨
 
 ## 安装
 
-从 Release 下载当前 XPI：
+从 GitHub 下载当前 XPI：
 
-[zotero-ai-reading-0.4.115.xpi](https://github.com/zhonghaoyi/zotero-ai-reading/releases/download/v0.4.115/zotero-ai-reading-0.4.115.xpi)
+[zotero-ai-reading-0.4.117.xpi](https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/main/dist/zotero-ai-reading-0.4.117.xpi)
 
 然后在 Zotero 中安装：
 
@@ -86,7 +86,7 @@ sh scripts/build-xpi.sh
 生成文件位于：
 
 ```text
-dist/zotero-ai-reading-0.4.115.xpi
+dist/zotero-ai-reading-0.4.117.xpi
 ```
 
 ## 开发安装

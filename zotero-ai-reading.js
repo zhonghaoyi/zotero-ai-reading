@@ -29,7 +29,7 @@ var ZoteroAIReading = {
   DEFAULTS: {
     aiURL: "https://chatgpt.com",
     aiPreset: "chatgpt",
-    transferMode: "gdrive",
+    transferMode: "file",
     openAIPage: true,
     openInReaderPane: false,
     readerPaneWidth: 520,
@@ -39,7 +39,7 @@ var ZoteroAIReading = {
     readerConversationURLs: "{}",
     linkPrompt: "请以这个 Google Drive PDF 链接作为主要来源：\n\n{gdriveLink}",
     filePrompt: "请以我刚上传的 PDF 文件作为主要来源。",
-    prompt: "请以这个 Google Drive PDF 链接作为主要来源：\n\n{gdriveLink}",
+    prompt: "请以我刚上传的 PDF 文件作为主要来源。",
     extraPrompt: ""
   },
 
@@ -5226,8 +5226,8 @@ var ZoteroAIReading = {
       return "file";
     }
     if (mode !== "gdrive" && mode !== "file" && mode !== "text") {
-      Zotero.Prefs.set(this.PREF_PREFIX + "transferMode", "gdrive", true);
-      return "gdrive";
+      Zotero.Prefs.set(this.PREF_PREFIX + "transferMode", "file", true);
+      return "file";
     }
     return mode;
   },
