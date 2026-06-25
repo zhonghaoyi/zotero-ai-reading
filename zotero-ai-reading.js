@@ -2186,6 +2186,9 @@ var ZoteroAIReading = {
       if (this.createHardLink(source.path, target.path) && target.exists()) {
         return target.path;
       }
+      if (this.copyFileToUploadPath(source, target) && target.exists()) {
+        return target.path;
+      }
       return source.path;
     }
     catch (error) {
@@ -2206,6 +2209,29 @@ var ZoteroAIReading = {
     }
     catch (error) {
       this.log("createHardLink failed: " + (error.stack || error.message || String(error)));
+      return false;
+    }
+  },
+
+  copyFileToUploadPath(source, target) {
+    try {
+      if (!source?.exists?.() || !source.isFile()) {
+        return false;
+      }
+      let parent = target.parent;
+      let leafName = target.leafName;
+      source.copyTo(parent, leafName);
+      if (!target.exists() || !target.isFile()) {
+        return false;
+      }
+      try {
+        target.lastModifiedTime = source.lastModifiedTime;
+      }
+      catch (_) {}
+      return target.fileSize === source.fileSize;
+    }
+    catch (error) {
+      this.log("copyFileToUploadPath failed: " + (error.stack || error.message || String(error)));
       return false;
     }
   },
@@ -2666,11 +2692,9 @@ var ZoteroAIReading = {
   },
 
   shouldUseGeminiReaderPanePaste(reader, options = {}) {
-    if (!options.prompt) {
-      return false;
-    }
-    let aiURL = options.aiURL || this.getReaderPaneURL(reader) || this.getAIURL();
-    return this.isGeminiURL(aiURL);
+    void reader;
+    void options;
+    return false;
   },
 
   shouldUseChatGLMReaderPaneClipboard(reader, options = {}) {
@@ -3480,13 +3504,26 @@ var ZoteroAIReading = {
   }
 
   function getVisibleText(element) {
-    return normalize(element && (element.innerText || element.textContent || ""));
+    if (!element) {
+      return "";
+    }
+    const pieces = [
+      element.innerText || "",
+      element.textContent || "",
+      element.getAttribute && element.getAttribute("title"),
+      element.getAttribute && element.getAttribute("aria-label"),
+      element.getAttribute && element.getAttribute("data-filename"),
+      element.getAttribute && element.getAttribute("data-file-name"),
+      element.getAttribute && element.getAttribute("data-testid")
+    ];
+    return normalize(pieces.filter(Boolean).join(" "));
   }
 
   function buildNeedles(fileName) {
     const normalized = normalize(fileName);
     const withoutExt = normalized.replace(/\\.pdf$/i, "");
     const shortStem = withoutExt.replace(/[^\\p{L}\\p{N}]+/gu, " ").trim();
+    const tokens = shortStem.split(" ").filter((token) => token.length >= 6 && !/^(zotero|reading|upload|file|document)$/i.test(token));
     const needles = [normalized];
     if (withoutExt && withoutExt !== normalized) {
       needles.push(withoutExt);
@@ -3494,11 +3531,34 @@ var ZoteroAIReading = {
     if (shortStem && shortStem.length >= 10) {
       needles.push(shortStem.slice(0, 32));
     }
+    for (const token of tokens) {
+      needles.push(token);
+    }
     return needles.filter(Boolean);
   }
 
   function isAttachmentUploadSignalText(text) {
-    return !/(failed|失败|不支持|unsupported|corrupt|损坏|error|错误|格式不支持)/i.test(text);
+    return !/(failed|失败|不支持|unsupported|corrupt|损坏|error|错误|格式不支持|too large|exceed|exceeded|超出|过大)/i.test(text);
+  }
+
+  function matchesAttachmentText(text, needles) {
+    const hasPdfContext = /\\.pdf\\b|pdf|uploaded|attached|file|document|附件|上传|文件|文档/.test(text);
+    if (hasPdfContext && needles.some((needle) => needle.length >= 6 && text.includes(needle))) {
+      return true;
+    }
+    if (needles.some((needle) => /^[a-z0-9_-]{8,}$/i.test(needle) && text.includes(needle))) {
+      return true;
+    }
+    if (!hasPdfContext) {
+      return false;
+    }
+    return needles.some((needle) => {
+      if (needle.length < 12) {
+        return false;
+      }
+      const prefix = needle.slice(0, Math.min(needle.length, 28));
+      return prefix.length >= 12 && text.includes(prefix);
+    });
   }
 
   function hasAttachment(fileName) {
@@ -3527,11 +3587,7 @@ var ZoteroAIReading = {
           if (!text) {
             continue;
           }
-          const matches = (
-            (text.includes(".pdf") && needles.some((needle) => text.includes(needle.slice(0, Math.min(needle.length, 40))))) ||
-            needles.some((needle) => needle.length >= 12 && text.includes(needle))
-          );
-          if (matches && isAttachmentUploadSignalText(text)) {
+          if (matchesAttachmentText(text, needles) && isAttachmentUploadSignalText(text)) {
             return true;
           }
         }
@@ -4754,13 +4810,19 @@ var ZoteroAIReading = {
           try {
             if (options.prompt) {
               let pastePrompt = () => {
+                if (options.readerPaneReader && this.isGeminiURL(aiURL)) {
+                  this.pasteTextIntoReaderPaneEditorOrClipboard(options.readerPaneReader, options.prompt, 300);
+                  return;
+                }
                 this.copyToClipboard(options.prompt);
                 pasteNow(false);
               };
-              if (options.readerPaneReader && options.pdfPath && !this.isGeminiURL(aiURL)) {
-                Promise.resolve(this.waitForReaderPanePDFAttachment(options.readerPaneReader, options.pdfPath, 18000))
+              if (options.readerPaneReader && options.pdfPath) {
+                let isGeminiReaderPane = this.isGeminiURL(aiURL);
+                let attachmentTimeout = isGeminiReaderPane ? 2000 : 18000;
+                Promise.resolve(this.waitForReaderPanePDFAttachment(options.readerPaneReader, options.pdfPath, attachmentTimeout))
                   .then((attached) => {
-                    if (attached) {
+                    if (attached || isGeminiReaderPane) {
                       pastePrompt();
                     }
                     else {
@@ -4772,7 +4834,6 @@ var ZoteroAIReading = {
                   });
               }
               else {
-                // Gemini often hides the pasted PDF filename, so its attachment probe can falsely fail.
                 pastePrompt();
               }
             }
@@ -4827,13 +4888,7 @@ var ZoteroAIReading = {
       promptPasteDelay: 1600
     };
 
-    if (this.isGeminiURL(aiURL)) {
-      profile.promptPasteDelay = 6500;
-      if (options.readerPaneReader) {
-        profile.filePasteDelay = 1000;
-      }
-    }
-    else if (this.isChatGLMURL(aiURL)) {
+    if (this.isChatGLMURL(aiURL)) {
       profile.filePasteDelay = 1000;
       profile.promptPasteDelay = options.readerPaneReader ? 600 : 2600;
     }
