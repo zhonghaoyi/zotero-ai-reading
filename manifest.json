@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
-  "name": "Zotero AI Reading",
-  "version": "0.4.122",
+  "name": "Zotero AI Reading (Windows)",
+  "version": "0.4.136",
   "description": "Send the selected Zotero item's PDF and a saved prompt to a configurable web AI chat.",
   "homepage_url": "https://github.com/zhonghaoyi/zotero-ai-reading",
   "icons": {
@@ -11,7 +11,7 @@
   "applications": {
     "zotero": {
       "id": "zoteroaireading@zhonghaoyi.dev",
-      "update_url": "https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/main/update.json",
+      "update_url": "https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/windows/update.json",
       "strict_min_version": "7.0",
       "strict_max_version": "10.*"
     }

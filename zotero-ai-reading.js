@@ -182,6 +182,23 @@ var ZoteroAIReading = {
     Zotero.debug("Zotero AI Reading: " + message);
   },
 
+  getPlatform() {
+    try {
+      return String(Services.appinfo?.OS || "");
+    }
+    catch (_) {
+      return "";
+    }
+  },
+
+  isWindows() {
+    return this.getPlatform() === "WINNT";
+  },
+
+  isMac() {
+    return this.getPlatform() === "Darwin";
+  },
+
   registerMenu() {
     if (Zotero.MenuManager && typeof Zotero.MenuManager.registerMenu === "function") {
       try {
@@ -241,7 +258,7 @@ var ZoteroAIReading = {
         Zotero.Reader.registerEventListener(
           "renderToolbar",
           (event) => {
-            this.injectReaderToolbarButton(event.reader);
+            this.injectReaderToolbarButtonFromEvent(event);
           },
           this.id
         );
@@ -261,6 +278,7 @@ var ZoteroAIReading = {
     try {
       for (let reader of this.getOpenReaders()) {
         let doc = reader?._iframeWindow?.document;
+        this.detachReaderToolbarButtonClickBridge(reader);
         if (doc) {
           doc.getElementById(this.READER_BUTTON_ID)?.remove();
           doc.getElementById(this.READER_PANE_ID)?.remove();
@@ -291,6 +309,37 @@ var ZoteroAIReading = {
     }
   },
 
+  injectReaderToolbarButtonFromEvent(event) {
+    try {
+      let reader = event?.reader;
+      let doc = event?.doc || reader?._iframeWindow?.document;
+      if (!reader || reader.type !== "pdf" || !doc) {
+        return;
+      }
+      this.injectReaderPaneStyle(doc);
+
+      let existingButton = doc.getElementById(this.READER_BUTTON_ID);
+      if (existingButton) {
+        this.attachReaderToolbarButtonClickBridge(reader, existingButton);
+        return;
+      }
+
+      let button = this.createReaderToolbarButton(doc, reader);
+      if (typeof event?.append === "function") {
+        event.append(button);
+        this.attachReaderToolbarButtonClickBridge(reader, button);
+        return;
+      }
+
+      if (this.appendReaderToolbarButtonToDOM(doc, button)) {
+        this.attachReaderToolbarButtonClickBridge(reader, button);
+      }
+    }
+    catch (error) {
+      this.log("injectReaderToolbarButtonFromEvent failed: " + (error.stack || error.message || String(error)));
+    }
+  },
+
   async injectReaderToolbarButton(reader) {
     try {
       if (!reader || reader.type !== "pdf") {
@@ -307,33 +356,290 @@ var ZoteroAIReading = {
       }
       this.injectReaderPaneStyle(doc);
 
-      let toolbar =
-        doc.querySelector(".toolbar .end .custom-sections") ||
-        doc.querySelector(".toolbar .end");
-      if (!toolbar) {
-        return;
-      }
-
       let existingButton = doc.getElementById(this.READER_BUTTON_ID);
+      let toolbar = this.getReaderToolbarButtonContainer(doc);
+      if (existingButton && toolbar && existingButton.parentNode !== toolbar) {
+        toolbar.appendChild(existingButton);
+        this.attachReaderToolbarButtonClickBridge(reader, existingButton);
+        return;
+      }
       if (existingButton) {
-        if (existingButton.parentNode !== toolbar) {
-          toolbar.appendChild(existingButton);
-        }
+        this.attachReaderToolbarButtonClickBridge(reader, existingButton);
         return;
       }
 
-      let button = doc.createElementNS(this.HTML_NS, "button");
-      button.id = this.READER_BUTTON_ID;
-      button.setAttribute("type", "button");
-      button.setAttribute("title", "Send PDF to Web AI");
-      button.setAttribute("aria-label", "Send PDF to Web AI");
-      button.className = "zai-reader-toolbar-button";
-      button.textContent = "AI";
-      button.addEventListener("click", () => this.runFromReader(reader));
-      toolbar.appendChild(button);
+      let button = this.createReaderToolbarButton(doc, reader);
+      if (this.appendReaderToolbarButtonToDOM(doc, button)) {
+        this.attachReaderToolbarButtonClickBridge(reader, button);
+      }
     }
     catch (error) {
       this.log("injectReaderToolbarButton failed: " + (error.stack || error.message || String(error)));
+    }
+  },
+
+  getReaderToolbarButtonContainer(doc) {
+    return (
+      doc?.querySelector?.(".toolbar .end .custom-sections") ||
+      doc?.querySelector?.(".toolbar .end") ||
+      doc?.querySelector?.(".toolbar")
+    );
+  },
+
+  appendReaderToolbarButtonToDOM(doc, button) {
+    let toolbar = this.getReaderToolbarButtonContainer(doc);
+    if (!toolbar || !button) {
+      return false;
+    }
+    toolbar.appendChild(button);
+    return true;
+  },
+
+  createReaderToolbarButton(doc, reader) {
+    let button = doc.createElementNS(this.HTML_NS, "button");
+    button.id = this.READER_BUTTON_ID;
+    button.setAttribute("type", "button");
+    button.setAttribute("title", "Open Web AI in the right pane");
+    button.setAttribute("aria-label", "Open Web AI in the right pane");
+    button.className = "zai-reader-toolbar-button";
+    button.textContent = "AI";
+
+    let run = (event) => {
+      try {
+        if (!this.isLeftActivationEvent(event)) {
+          return;
+        }
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+      }
+      catch (_) {}
+      this.runReaderToolbarButton(reader, button);
+    };
+    button.addEventListener("pointerdown", run, true);
+    button.addEventListener("mousedown", run, true);
+    button.addEventListener("click", run, true);
+    button.addEventListener("command", run, true);
+    return button;
+  },
+
+  isLeftActivationEvent(event) {
+    return !(
+      event &&
+      (event.type === "pointerdown" || event.type === "mousedown" || event.type === "click") &&
+      typeof event.button === "number" &&
+      event.button !== 0
+    );
+  },
+
+  runReaderToolbarButton(reader, button) {
+    let now = Date.now();
+    if (button?._zaiLastRunAt && now - button._zaiLastRunAt < 700) {
+      return;
+    }
+    if (button) {
+      button._zaiLastRunAt = now;
+    }
+    this.runFromReader(reader, { openInReaderPane: true });
+  },
+
+  attachReaderToolbarButtonClickBridge(reader, button) {
+    try {
+      let iframe = reader?._iframe;
+      let doc = iframe?.ownerDocument;
+      if (!iframe || !doc || !button) {
+        return false;
+      }
+
+      this.detachReaderToolbarButtonClickBridge(reader);
+      let listener = (event) => {
+        try {
+          if (!this.isLeftActivationEvent(event)) {
+            return;
+          }
+          let iframeRect = iframe.getBoundingClientRect();
+          if (
+            event.clientX < iframeRect.left ||
+            event.clientX > iframeRect.right ||
+            event.clientY < iframeRect.top ||
+            event.clientY > iframeRect.bottom
+          ) {
+            return;
+          }
+          let buttonRect = button.getBoundingClientRect();
+          let x = event.clientX - iframeRect.left;
+          let y = event.clientY - iframeRect.top;
+          if (
+            x < buttonRect.left ||
+            x > buttonRect.right ||
+            y < buttonRect.top ||
+            y > buttonRect.bottom
+          ) {
+            return;
+          }
+          event.preventDefault?.();
+          event.stopPropagation?.();
+          this.runReaderToolbarButton(reader, button);
+        }
+        catch (error) {
+          this.log("reader toolbar click bridge failed: " + (error.stack || error.message || String(error)));
+        }
+      };
+
+      doc.addEventListener("pointerdown", listener, true);
+      doc.addEventListener("mousedown", listener, true);
+      doc.addEventListener("click", listener, true);
+      iframe._zaiReaderToolbarButtonClickBridge = { doc, listener };
+      this.ensureReaderToolbarButtonOverlay(reader, button);
+      this.scheduleReaderToolbarButtonOverlaySync(reader, button);
+      return true;
+    }
+    catch (error) {
+      this.log("attachReaderToolbarButtonClickBridge failed: " + (error.stack || error.message || String(error)));
+      return false;
+    }
+  },
+
+  detachReaderToolbarButtonClickBridge(reader) {
+    try {
+      let iframe = reader?._iframe;
+      let bridge = iframe?._zaiReaderToolbarButtonClickBridge;
+      if (bridge) {
+        bridge.doc?.removeEventListener?.("pointerdown", bridge.listener, true);
+        bridge.doc?.removeEventListener?.("mousedown", bridge.listener, true);
+        bridge.doc?.removeEventListener?.("click", bridge.listener, true);
+        delete iframe._zaiReaderToolbarButtonClickBridge;
+      }
+
+      let overlayState = iframe?._zaiReaderToolbarButtonOverlay;
+      if (overlayState) {
+        try {
+          overlayState.window?.removeEventListener?.("resize", overlayState.resizeListener, true);
+        }
+        catch (_) {}
+        try {
+          overlayState.overlay?.remove?.();
+        }
+        catch (_) {}
+        delete iframe._zaiReaderToolbarButtonOverlay;
+      }
+    }
+    catch (error) {
+      this.log("detachReaderToolbarButtonClickBridge failed: " + (error.stack || error.message || String(error)));
+    }
+  },
+
+  getReaderToolbarButtonOverlayID(reader) {
+    return this.READER_BUTTON_ID + "-overlay-" + this.getReaderStableID(reader);
+  },
+
+  ensureReaderToolbarButtonOverlay(reader, button) {
+    try {
+      let iframe = reader?._iframe;
+      let doc = iframe?.ownerDocument;
+      if (!iframe || !doc || !button) {
+        return false;
+      }
+
+      let overlay = doc.getElementById(this.getReaderToolbarButtonOverlayID(reader));
+      if (!overlay) {
+        overlay = doc.createXULElement
+          ? doc.createXULElement("button")
+          : doc.createElementNS(this.HTML_NS, "button");
+        overlay.id = this.getReaderToolbarButtonOverlayID(reader);
+        overlay.setAttribute("label", "AI");
+        overlay.setAttribute("aria-label", "Open Web AI in the right pane");
+        overlay.setAttribute("tooltiptext", "Open Web AI in the right pane");
+        overlay.setAttribute("tabindex", "-1");
+
+        let run = (event) => {
+          try {
+            if (!this.isLeftActivationEvent(event)) {
+              return;
+            }
+            event?.preventDefault?.();
+            event?.stopPropagation?.();
+          }
+          catch (_) {}
+          this.runReaderToolbarButton(reader, button);
+        };
+        overlay.addEventListener("pointerdown", run, true);
+        overlay.addEventListener("mousedown", run, true);
+        overlay.addEventListener("click", run, true);
+        overlay.addEventListener("command", run, true);
+
+        (doc.documentElement || doc).appendChild(overlay);
+      }
+
+      let resizeListener = () => this.positionReaderToolbarButtonOverlay(reader, button);
+      let win = doc.defaultView;
+      try {
+        win?.addEventListener?.("resize", resizeListener, true);
+      }
+      catch (_) {}
+      iframe._zaiReaderToolbarButtonOverlay = { overlay, window: win, resizeListener };
+      return this.positionReaderToolbarButtonOverlay(reader, button);
+    }
+    catch (error) {
+      this.log("ensureReaderToolbarButtonOverlay failed: " + (error.stack || error.message || String(error)));
+      return false;
+    }
+  },
+
+  scheduleReaderToolbarButtonOverlaySync(reader, button) {
+    let win = reader?._iframe?.ownerDocument?.defaultView;
+    let delays = [0, 80, 250, 600, 1200, 2400];
+    for (let delay of delays) {
+      try {
+        win?.setTimeout?.(() => this.positionReaderToolbarButtonOverlay(reader, button), delay);
+      }
+      catch (_) {}
+    }
+  },
+
+  positionReaderToolbarButtonOverlay(reader, button) {
+    try {
+      let iframe = reader?._iframe;
+      let overlay = iframe?._zaiReaderToolbarButtonOverlay?.overlay;
+      if (!iframe || !overlay || !button?.isConnected) {
+        return false;
+      }
+
+      let iframeRect = iframe.getBoundingClientRect();
+      let buttonRect = button.getBoundingClientRect();
+      if (
+        !Number.isFinite(buttonRect.width) ||
+        !Number.isFinite(buttonRect.height) ||
+        buttonRect.width < 4 ||
+        buttonRect.height < 4
+      ) {
+        overlay.setAttribute("hidden", "true");
+        return false;
+      }
+
+      overlay.removeAttribute("hidden");
+      let style = overlay.style;
+      style.setProperty("position", "fixed", "important");
+      style.setProperty("left", Math.round(iframeRect.left + buttonRect.left) + "px", "important");
+      style.setProperty("top", Math.round(iframeRect.top + buttonRect.top) + "px", "important");
+      style.setProperty("width", Math.ceil(buttonRect.width) + "px", "important");
+      style.setProperty("height", Math.ceil(buttonRect.height) + "px", "important");
+      style.setProperty("min-width", "0", "important");
+      style.setProperty("min-height", "0", "important");
+      style.setProperty("margin", "0", "important");
+      style.setProperty("padding", "0", "important");
+      style.setProperty("border", "0", "important");
+      style.setProperty("background", "transparent", "important");
+      style.setProperty("color", "transparent", "important");
+      style.setProperty("display", "block", "important");
+      style.setProperty("opacity", "0", "important");
+      style.setProperty("pointer-events", "auto", "important");
+      style.setProperty("z-index", "2147483647", "important");
+      style.setProperty("appearance", "none", "important");
+      return true;
+    }
+    catch (error) {
+      this.log("positionReaderToolbarButtonOverlay failed: " + (error.stack || error.message || String(error)));
+      return false;
     }
   },
 
@@ -498,15 +804,15 @@ var ZoteroAIReading = {
     try {
       this.clearPasteTimers();
       let selected = await this.getPDFForReader(reader);
-      let prompt = await this.buildPrompt(selected.item, selected.attachment, selected.pdfPath);
       let aiURL = this.getAIURL();
       let transferMode = this.getTransferMode();
-      let uploadPDFPath = transferMode === "file" ? this.preparePDFUploadPath(selected.pdfPath, selected.attachment) : selected.pdfPath;
       let openedInReaderPane = false;
       let readerPaneResult = null;
 
-      if (this.getBoolPref("openAIPage")) {
-        if (this.getBoolPref("openInReaderPane")) {
+      let shouldOpenInReaderPane = Boolean(options.openInReaderPane) || this.getBoolPref("openInReaderPane");
+      let shouldOpenAIPage = shouldOpenInReaderPane || this.getBoolPref("openAIPage");
+      if (shouldOpenAIPage) {
+        if (shouldOpenInReaderPane) {
           readerPaneResult = await this.openAIInReaderPane(reader, aiURL, {
             forceNewConversation: Boolean(options.forceNewConversation)
           });
@@ -525,13 +831,16 @@ var ZoteroAIReading = {
       // explicit path that starts fresh and sends the PDF/prompt again.
       let pasteIntoResumedReaderConversation = false;
 
+      if (resumedReaderConversation && !pasteIntoResumedReaderConversation) {
+        this.clearReaderPanePastePayload(reader, aiURL);
+        return;
+      }
+
+      let prompt = await this.buildPrompt(selected.item, selected.attachment, selected.pdfPath);
+      let uploadPDFPath = transferMode === "file" ? this.preparePDFUploadPath(selected.pdfPath, selected.attachment) : selected.pdfPath;
+      let shouldAutoPaste = this.getBoolPref("autoPaste") && this.isAutoPasteTarget(aiURL);
+
       if (!resumedReaderConversation || pasteIntoResumedReaderConversation) {
-        if (transferMode === "file") {
-          this.copyPDFFileToClipboard(uploadPDFPath);
-        }
-        else {
-          this.copyToClipboard(prompt);
-        }
         if (openedInReaderPane) {
           this.rememberReaderPanePastePayload(reader, {
             pdfPath: uploadPDFPath,
@@ -539,13 +848,24 @@ var ZoteroAIReading = {
             transferMode,
             aiURL
           });
+          if (transferMode !== "file") {
+            this.copyToClipboard(prompt);
+          }
+        }
+        else if (!shouldAutoPaste) {
+          if (transferMode === "file") {
+            this.copyPDFFileToClipboardAsync(uploadPDFPath);
+          }
+          else {
+            this.copyToClipboard(prompt);
+          }
         }
       }
       else if (openedInReaderPane) {
         this.clearReaderPanePastePayload(reader, aiURL);
       }
 
-      if (this.getBoolPref("autoPaste") && this.isAutoPasteTarget(aiURL)) {
+      if (shouldAutoPaste) {
         if (openedInReaderPane) {
           if (!resumedReaderConversation || pasteIntoResumedReaderConversation) {
             let pastePayload = {
@@ -556,12 +876,14 @@ var ZoteroAIReading = {
               forceNewConversation: Boolean(options.forceNewConversation),
               readerPaneLoadedFresh: Boolean(readerPaneResult?.loadedFresh)
             };
-            if (this.isChatGLMURL(aiURL)) {
-              this.scheduleReaderPanePasteWhenEditorReady(reader, pastePayload);
-            }
-            else {
-              this.scheduleReaderPanePaste(reader, pastePayload);
-            }
+            // Always wait until the web AI editor is actually ready before pasting.
+            // The old fixed-delay scheduleReaderPanePaste path fired ~150ms after the
+            // pane opened (file mode), before chatgpt.com finished loading, so the
+            // automatic PDF upload silently missed and only the manual paste button
+            // (clicked after the page had loaded) worked. Polling for editor readiness,
+            // the same path ChatGLM already used, makes click-AI auto-upload land for
+            // ChatGPT/Claude/DeepSeek/Grok/custom targets too.
+            this.scheduleReaderPanePasteWhenEditorReady(reader, pastePayload);
           }
         }
         else {
@@ -814,6 +1136,7 @@ var ZoteroAIReading = {
         loadedFresh = this.loadReaderWebView(webView, targetURL, {
           forceReload: forceUserNewConversation || (this.isChatGLMURL(aiURL) && forceFreshConversation)
         });
+        this.activateReaderPaneWebView(webView);
       }
 
       this.lastReaderPaneReader = reader;
@@ -1193,7 +1516,7 @@ var ZoteroAIReading = {
     restart.setAttribute("label", "重新上传");
     restart.setAttribute("tooltiptext", "新开对话并重新上传当前 PDF");
     restart.addEventListener("click", () => {
-      this.runFromReader(reader, { forceNewConversation: true });
+      this.runFromReader(reader, { forceNewConversation: true, openInReaderPane: true });
     });
 
     let paste = makeXUL("button", "");
@@ -1251,6 +1574,8 @@ var ZoteroAIReading = {
       browser.setAttribute("type", "content");
       browser.setAttribute("remote", "true");
       browser.setAttribute("maychangeremoteness", "true");
+      browser.setAttribute("nodefaultsrc", "true");
+      browser.setAttribute("transparent", "transparent");
       browser.setAttribute("disableglobalhistory", "true");
       browser.setAttribute("src", "about:blank");
       browser.setAttribute("flex", "1");
@@ -1272,7 +1597,8 @@ var ZoteroAIReading = {
 
   loadReaderWebView(webView, aiURL, options = {}) {
     try {
-      if (!options.forceReload && webView.getAttribute("src") === aiURL) {
+      let currentTarget = webView.getAttribute("data-zai-src") || webView.getAttribute("src");
+      if (!options.forceReload && currentTarget === aiURL) {
         return false;
       }
       if (options.forceReload) {
@@ -1281,21 +1607,35 @@ var ZoteroAIReading = {
         }
         catch (_) {}
       }
-      webView.setAttribute("src", aiURL);
+      this.activateReaderPaneWebView(webView);
+      let loadedByAPI = false;
       if (typeof webView.loadURI === "function") {
         try {
           let principal = Services.scriptSecurityManager?.getSystemPrincipal?.();
+          let uri = Services.io?.newURI ? Services.io.newURI(aiURL) : aiURL;
           if (principal) {
-            webView.loadURI(aiURL, { triggeringPrincipal: principal });
+            webView.loadURI(uri, { triggeringPrincipal: principal });
           }
           else {
-            webView.loadURI(aiURL);
+            webView.loadURI(uri);
           }
+          loadedByAPI = true;
         }
         catch (error) {
           this.log("loadReaderWebView loadURI fallback: " + (error.stack || error.message || String(error)));
+          try {
+            webView.loadURI(aiURL);
+            loadedByAPI = true;
+          }
+          catch (fallbackError) {
+            this.log("loadReaderWebView string loadURI failed: " + (fallbackError.stack || fallbackError.message || String(fallbackError)));
+          }
         }
       }
+      if (!loadedByAPI) {
+        webView.setAttribute("src", aiURL);
+      }
+      webView.setAttribute("data-zai-src", aiURL);
       return true;
     }
     catch (error) {
@@ -1335,6 +1675,10 @@ var ZoteroAIReading = {
     catch (_) {}
     try {
       candidates.push(webView?.getAttribute?.("src"));
+    }
+    catch (_) {}
+    try {
+      candidates.push(webView?.getAttribute?.("data-zai-src"));
     }
     catch (_) {}
 
@@ -1419,7 +1763,11 @@ var ZoteroAIReading = {
 
   getReaderPanePastePayload(reader, aiURL = "") {
     let key = this.getReaderConversationKey(reader, aiURL || this.getAIURL());
-    return (key && this.readerPanePastePayloads.get(key)) || null;
+    let payload = (key && this.readerPanePastePayloads.get(key)) || null;
+    if (payload && payload.transferMode && payload.transferMode !== this.getTransferMode()) {
+      return null;
+    }
+    return payload;
   },
 
   clearReaderPanePastePayload(reader, aiURL = "") {
@@ -1773,13 +2121,13 @@ var ZoteroAIReading = {
         ".zai-reader-ai-splitter{flex:0 0 6px!important;width:6px!important;min-width:6px!important;cursor:ew-resize;background:var(--fill-quinary,rgba(128,128,128,.10));border-left:1px solid var(--fill-quarternary,rgba(128,128,128,.25));}",
         ".zai-reader-ai-splitter:hover,.zai-reader-ai-resizing .zai-reader-ai-splitter{background:var(--accent-blue,#2563eb);}",
         ".zai-reader-ai-resizing .reader,.zai-reader-ai-resizing .zai-reader-ai-browser{pointer-events:none!important;}",
-        ".zai-reader-ai-pane{display:flex!important;flex-direction:column!important;flex:0 0 520px;width:520px;min-width:320px;max-width:900px;min-height:0;overflow:hidden;background:var(--material-sidepane,#fff);color:var(--fill-primary,#111);border-left:1px solid var(--fill-quarternary,rgba(128,128,128,.35));box-shadow:-8px 0 24px rgba(0,0,0,.16);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;}",
+        ".zai-reader-ai-pane{display:flex!important;flex-direction:column!important;flex:0 0 520px;width:520px;min-width:320px;max-width:900px;min-height:0;overflow:hidden;position:relative!important;z-index:20!important;background:var(--material-sidepane,#fff);color:var(--fill-primary,#111);border-left:1px solid var(--fill-quarternary,rgba(128,128,128,.35));box-shadow:-8px 0 24px rgba(0,0,0,.16);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif;}",
         ".zai-reader-ai-header{min-height:42px;padding:0 10px;border-bottom:1px solid var(--fill-quarternary,rgba(128,128,128,.25));}",
         ".zai-reader-ai-title{gap:8px;font-weight:650;font-size:13px;white-space:nowrap;}",
         ".zai-reader-ai-badge{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:7px;background:#2563eb;color:#fff;font-size:11px;font-weight:800;}",
         ".zai-reader-ai-actions{gap:6px;}",
         ".zai-reader-ai-actions button{min-height:24px;font-size:12px;}",
-        ".zai-reader-ai-frame,.zai-reader-ai-browser{width:100%;min-width:0;min-height:0;border:0;background:#fff;}",
+        ".zai-reader-ai-frame,.zai-reader-ai-browser{display:block!important;flex:1 1 auto!important;width:100%;height:100%;min-width:0;min-height:0;border:0;background:#fff;pointer-events:auto!important;position:relative!important;z-index:21!important;}",
         "@media (max-width:1100px){.zai-reader-ai-pane{min-width:300px;}}"
       ].join("\n");
     }
@@ -1886,6 +2234,10 @@ var ZoteroAIReading = {
   },
 
   async getGoogleDriveFileIDFromXAttr(pdfPath) {
+    if (!this.isMac()) {
+      return "";
+    }
+
     let outputFile = this.getTempFile("zotero-ai-reading-drive-id");
     try {
       let command =
@@ -1929,6 +2281,57 @@ var ZoteroAIReading = {
     return file;
   },
 
+  getTempFileWithExtension(prefix, extension) {
+    let dirService = Cc["@mozilla.org/file/directory_service;1"].getService(Ci.nsIProperties);
+    let file = dirService.get("TmpD", Ci.nsIFile);
+    let safeExtension = String(extension || "").replace(/[^A-Za-z0-9.]/g, "") || ".tmp";
+    if (!safeExtension.startsWith(".")) {
+      safeExtension = "." + safeExtension;
+    }
+    let suffix = Date.now() + "-" + Math.floor(Math.random() * 1000000) + safeExtension;
+    file.append(prefix + "-" + suffix);
+    return file;
+  },
+
+  writeTextFile(file, text) {
+    let output = Cc["@mozilla.org/network/file-output-stream;1"]
+      .createInstance(Ci.nsIFileOutputStream);
+    output.init(file, 0x02 | 0x08 | 0x20, 0o600, 0);
+    let converter = Cc["@mozilla.org/intl/converter-output-stream;1"]
+      .createInstance(Ci.nsIConverterOutputStream);
+    converter.init(output, "UTF-8");
+    converter.writeString(String(text || ""));
+    converter.close();
+  },
+
+  createLocalFile(path) {
+    if (!path) {
+      return null;
+    }
+    let file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+    file.initWithPath(String(path));
+    return file;
+  },
+
+  appendPathParts(file, parts) {
+    let target = file.clone();
+    for (let part of parts || []) {
+      target.append(part);
+    }
+    return target;
+  },
+
+  getEnvironmentVariable(name) {
+    try {
+      return Cc["@mozilla.org/process/environment;1"]
+        .getService(Ci.nsIEnvironment)
+        .get(name) || "";
+    }
+    catch (_) {
+      return "";
+    }
+  },
+
   runShellCommand(command) {
     let executable = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
     executable.initWithPath("/bin/sh");
@@ -1964,48 +2367,72 @@ var ZoteroAIReading = {
   },
 
   parseGoogleDrivePath(pdfPath) {
-    let marker = "/Library/CloudStorage/";
-    let index = String(pdfPath || "").indexOf(marker);
-    if (index === -1) {
+    let normalizedPath = String(pdfPath || "").replace(/\\/g, "/");
+    let pathParts = normalizedPath.split("/").filter(Boolean);
+    let cloudStorageIndex = normalizedPath.indexOf("/Library/CloudStorage/");
+    let parts = [];
+
+    if (cloudStorageIndex !== -1) {
+      let relative = normalizedPath
+        .slice(cloudStorageIndex + "/Library/CloudStorage/".length)
+        .split("/")
+        .filter(Boolean);
+      if (!relative[0]?.startsWith("GoogleDrive-")) {
+        return null;
+      }
+      pathParts = relative.slice(1);
+    }
+
+    let rootIndex = pathParts.findIndex((part) => (
+      part === "My Drive" ||
+      part === "我的云端硬盘"
+    ));
+    if (rootIndex === -1) {
       return null;
     }
 
-    let relative = pdfPath.slice(index + marker.length).split("/").filter(Boolean);
-    if (!relative[0]?.startsWith("GoogleDrive-")) {
-      return null;
-    }
-
-    let driveRoot = relative[1];
-    if (driveRoot !== "My Drive" && driveRoot !== "我的云端硬盘") {
-      return null;
-    }
-
-    let parts = relative.slice(2);
+    parts = pathParts.slice(rootIndex + 1);
     return parts.length ? { parts } : null;
   },
 
   getDriveFSMetadataDBs() {
     let results = [];
     try {
+      let driveFSRoots = [];
       let dirService = Cc["@mozilla.org/file/directory_service;1"].getService(Ci.nsIProperties);
-      let driveFS = dirService.get("Home", Ci.nsIFile);
-      for (let part of ["Library", "Application Support", "Google", "DriveFS"]) {
-        driveFS.append(part);
+
+      if (this.isWindows()) {
+        let localAppData = this.createLocalFile(this.getEnvironmentVariable("LOCALAPPDATA"));
+        if (localAppData) {
+          driveFSRoots.push(this.appendPathParts(localAppData, ["Google", "DriveFS"]));
+        }
+
+        let home = dirService.get("Home", Ci.nsIFile);
+        driveFSRoots.push(this.appendPathParts(home, ["AppData", "Local", "Google", "DriveFS"]));
       }
-      if (!driveFS.exists() || !driveFS.isDirectory()) {
-        return results;
+      else {
+        let home = dirService.get("Home", Ci.nsIFile);
+        driveFSRoots.push(this.appendPathParts(home, ["Library", "Application Support", "Google", "DriveFS"]));
       }
 
-      let entries = driveFS.directoryEntries;
-      while (entries.hasMoreElements()) {
-        let entry = entries.getNext().QueryInterface(Ci.nsIFile);
-        if (!entry.isDirectory()) {
+      let seen = new Set();
+      for (let driveFS of driveFSRoots) {
+        if (!driveFS || !driveFS.exists() || !driveFS.isDirectory()) {
           continue;
         }
-        let dbFile = entry.clone();
-        dbFile.append("metadata_sqlite_db");
-        if (dbFile.exists() && dbFile.isFile()) {
-          results.push(dbFile);
+
+        let entries = driveFS.directoryEntries;
+        while (entries.hasMoreElements()) {
+          let entry = entries.getNext().QueryInterface(Ci.nsIFile);
+          if (!entry.isDirectory()) {
+            continue;
+          }
+          let dbFile = entry.clone();
+          dbFile.append("metadata_sqlite_db");
+          if (dbFile.exists() && dbFile.isFile() && !seen.has(dbFile.path)) {
+            seen.add(dbFile.path);
+            results.push(dbFile);
+          }
         }
       }
     }
@@ -2137,7 +2564,7 @@ var ZoteroAIReading = {
   },
 
   getFileName(path) {
-    let parts = String(path || "").split("/");
+    let parts = String(path || "").split(/[\\/]/);
     return parts[parts.length - 1] || String(path || "");
   },
 
@@ -2148,7 +2575,6 @@ var ZoteroAIReading = {
       if (!source.exists() || !source.isFile()) {
         return pdfPath;
       }
-
       let tempDir = Services.dirsvc.get("TmpD", Ci.nsIFile);
       tempDir.append("zotero-ai-reading-uploads");
       if (!tempDir.exists()) {
@@ -2198,6 +2624,10 @@ var ZoteroAIReading = {
   },
 
   createHardLink(sourcePath, targetPath) {
+    if (!this.isMac()) {
+      return false;
+    }
+
     try {
       let executable = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
       executable.initWithPath("/bin/ln");
@@ -2267,7 +2697,8 @@ var ZoteroAIReading = {
   },
 
   scheduleReaderPanePaste(reader, options = {}) {
-    let delay = Math.max(1000, this.getIntPref("pasteDelayMs"));
+    let configuredDelay = Math.max(1000, this.getIntPref("pasteDelayMs"));
+    let delay = options.transferMode === "file" ? 150 : configuredDelay;
     let timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
     let callback = () => {
       Promise.resolve().then(async () => {
@@ -2295,7 +2726,7 @@ var ZoteroAIReading = {
     let isChatGLM = this.isChatGLMURL(options.aiURL);
     let isFreshGLMPage = isChatGLM && (options.forceNewConversation || options.readerPaneLoadedFresh);
     let maxWaitMs = isChatGLM ? (isFreshGLMPage ? 30000 : 18000) : 15000;
-    let pollDelayMs = isChatGLM ? 700 : 500;
+    let pollDelayMs = isChatGLM ? 700 : 200;
     let readyTimeoutMs = isChatGLM ? 1800 : 900;
     let readyAttempts = isChatGLM ? 8 : 2;
 
@@ -2319,7 +2750,7 @@ var ZoteroAIReading = {
         });
     };
 
-    this.schedulePasteTimer(tryPaste, isFreshGLMPage ? 600 : 300);
+    this.schedulePasteTimer(tryPaste, isFreshGLMPage ? 600 : (options.forceNewConversation ? 1500 : 0));
   },
 
   getReaderPaneFrameForReader(reader) {
@@ -2363,16 +2794,44 @@ var ZoteroAIReading = {
       return this.pasteIntoGeminiReaderPane(reader, options);
     }
 
-    if (!this.shouldUseClaudeReaderPaneClipboard(reader, options)) {
+    if (!options.prompt) {
       return false;
     }
 
     if (options.transferMode === "file" && options.pdfPath) {
-      if (!this.pastePDFFileClipboardIntoClaudeReaderPane(reader, options.pdfPath)) {
-        return false;
+      await this.waitForReaderPaneEditorReady(reader, 2500, 10);
+      let alreadyAttached =
+        !options.forceNewConversation &&
+        await this.isReaderPanePDFAlreadyAttached(reader, options.pdfPath, 900);
+      if (!alreadyAttached) {
+        // Robust DOM upload first: the injected frame script sets the page input
+        // type=file directly, so it works without a user gesture, OS clipboard, or a
+        // synthetic Ctrl+V -- the things that made timer-triggered auto-paste miss on
+        // ChatGPT while a manual click still worked. Same path that already makes
+        // ChatGLM auto-upload reliable; clipboard paste stays only as a fallback.
+        let uploaded =
+          await this.uploadPDFFileIntoReaderPaneByDOM(reader, options.pdfPath) ||
+          await this.pastePDFFileClipboardIntoReaderPaneAndWait(reader, options.pdfPath);
+        if (!uploaded) {
+          return false;
+        }
+      }
+      else {
+        this.log("Reader pane already has this PDF attached; skipping duplicate PDF paste");
       }
       if (options.prompt) {
-        this.pasteTextClipboardIntoClaudeReaderPane(reader, options.prompt, 2600);
+        if (alreadyAttached) {
+          this.pasteTextClipboardIntoClaudeReaderPane(reader, options.prompt, 300);
+        }
+        else {
+          this.pastePromptAfterReaderPanePDFAttachment(
+            reader,
+            options.pdfPath,
+            () => this.pasteTextClipboardIntoClaudeReaderPane(reader, options.prompt, 300),
+            2500,
+            6000
+          );
+        }
       }
       return true;
     }
@@ -2400,7 +2859,7 @@ var ZoteroAIReading = {
             .catch((error) => {
               this.log("insert ChatGLM prompt failed: " + (error.stack || error.message || String(error)));
             });
-        }, 2600);
+        }, 1800);
         return true;
       }
 
@@ -2495,12 +2954,14 @@ var ZoteroAIReading = {
 
   async pastePDFFileClipboardIntoFocusedReaderPane(reader, pdfPath) {
     try {
-      this.copyPDFFileToClipboard(pdfPath);
       this.focusReaderPaneFrame(reader);
       await this.waitForReaderPaneEditorReady(reader, 2200, 8);
       this.focusReaderPaneFrame(reader);
-      this.runAppleScript(this.getPasteAppleScript("", true), true);
-      return await this.waitForReaderPanePDFAttachment(reader, pdfPath, 18000);
+      let pasted = await this.pastePDFFileClipboardIntoReaderPaneAndWait(reader, pdfPath);
+      if (!pasted) {
+        return false;
+      }
+      return await this.waitForReaderPanePDFAttachment(reader, pdfPath, 6000);
     }
     catch (error) {
       this.log("pastePDFFileClipboardIntoFocusedReaderPane failed: " + (error.stack || error.message || String(error)));
@@ -2508,7 +2969,7 @@ var ZoteroAIReading = {
     }
   },
 
-  waitForReaderPanePDFAttachment(reader, pdfPath, timeoutMs = 18000) {
+  waitForReaderPanePDFAttachment(reader, pdfPath, timeoutMs = 6000) {
     return new Promise((resolve) => {
       let settled = false;
       let done = (ok) => {
@@ -2547,7 +3008,7 @@ var ZoteroAIReading = {
           done(Boolean(message?.data?.attached));
         };
         timeoutTimer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
-        timeoutTimer.initWithCallback(() => done(false), Math.max(1000, Number(timeoutMs) || 18000), Ci.nsITimer.TYPE_ONE_SHOT);
+        timeoutTimer.initWithCallback(() => done(false), Math.max(1000, Number(timeoutMs) || 6000), Ci.nsITimer.TYPE_ONE_SHOT);
         messageManager.addMessageListener(replyName, onReply);
         let scriptURL =
           "data:application/javascript;charset=utf-8," +
@@ -2566,29 +3027,91 @@ var ZoteroAIReading = {
 
   pastePDFFileClipboardIntoClaudeReaderPane(reader, pdfPath) {
     try {
-      this.copyPDFFileToClipboard(pdfPath);
-      this.focusReaderPaneFrame(reader);
-      this.focusClaudeEditorInReaderPane(reader);
-
-      let timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
-      let callback = () => {
-        try {
-          this.focusReaderPaneFrame(reader);
-          this.focusClaudeEditorInReaderPane(reader);
-          this.runAppleScript(this.getPasteAppleScript("", true), true);
+      return this.pastePDFFileClipboardIntoFocusedReaderPaneNow(reader, pdfPath, (ok) => {
+        if (!ok) {
+          this.log("Reader pane PDF clipboard paste did not complete");
         }
-        finally {
-          this.pasteTimers = this.pasteTimers.filter((candidate) => candidate !== timer);
-        }
-      };
-      timer.initWithCallback(callback, 600, Ci.nsITimer.TYPE_ONE_SHOT);
-      this.pasteTimers.push(timer);
-      return true;
+      });
     }
     catch (error) {
       this.log("pastePDFFileClipboardIntoClaudeReaderPane failed: " + (error.stack || error.message || String(error)));
       return false;
     }
+  },
+
+  pastePDFFileClipboardIntoReaderPaneAndWait(reader, pdfPath) {
+    return new Promise((resolve) => {
+      try {
+        if (!this.pastePDFFileClipboardIntoFocusedReaderPaneNow(reader, pdfPath, (ok) => resolve(Boolean(ok)))) {
+          resolve(false);
+        }
+      }
+      catch (error) {
+        this.log("pastePDFFileClipboardIntoReaderPaneAndWait failed: " + (error.stack || error.message || String(error)));
+        resolve(false);
+      }
+    });
+  },
+
+  async isReaderPanePDFAlreadyAttached(reader, pdfPath, timeoutMs = 900) {
+    try {
+      if (!reader || !pdfPath) {
+        return false;
+      }
+      return Boolean(await this.waitForReaderPanePDFAttachment(reader, pdfPath, timeoutMs));
+    }
+    catch (error) {
+      this.log("isReaderPanePDFAlreadyAttached failed: " + (error.stack || error.message || String(error)));
+      return false;
+    }
+  },
+
+  pastePDFFileClipboardIntoFocusedReaderPaneNow(reader, pdfPath, onComplete = null) {
+    try {
+      this.focusReaderPaneFrame(reader);
+      this.focusClaudeEditorInReaderPane(reader);
+      if (this.isWindows()) {
+        return this.runPowerShellAsync(
+          this.getSetFileClipboardPowerShell(pdfPath).concat(this.getPastePowerShell("", true)),
+          onComplete
+        );
+      }
+
+      this.copyPDFFileToClipboard(pdfPath);
+      return this.runPasteKeystroke("", true, true, onComplete);
+    }
+    catch (error) {
+      this.log("pastePDFFileClipboardIntoFocusedReaderPaneNow failed: " + (error.stack || error.message || String(error)));
+      if (onComplete) {
+        try {
+          onComplete(false);
+        }
+        catch (_) {}
+      }
+      return false;
+    }
+  },
+
+  pastePromptAfterReaderPanePDFAttachment(reader, pdfPath, pastePrompt, timeoutMs = 10000, minDelayMs = 6000) {
+    let startedAt = Date.now();
+    Promise.resolve(this.waitForReaderPanePDFAttachment(reader, pdfPath, timeoutMs))
+      .then((attached) => {
+        let elapsed = Date.now() - startedAt;
+        let requiredDelay = attached ? 1200 : Math.max(0, Number(minDelayMs) || 0);
+        let remainingDelay = Math.max(0, requiredDelay - elapsed);
+        this.schedulePasteTimer(() => {
+          if (!attached) {
+            this.log("Reader pane PDF attachment was not detected before timeout; pasting prompt after PDF paste attempt");
+          }
+          pastePrompt();
+        }, remainingDelay);
+      })
+      .catch((error) => {
+        this.log("Reader pane PDF attachment wait failed: " + (error.stack || error.message || String(error)));
+        let elapsed = Date.now() - startedAt;
+        let remainingDelay = Math.max(0, (Number(minDelayMs) || 0) - elapsed);
+        this.schedulePasteTimer(pastePrompt, remainingDelay);
+      });
   },
 
   pasteTextClipboardIntoClaudeReaderPane(reader, prompt, delay = 600) {
@@ -2606,7 +3129,7 @@ var ZoteroAIReading = {
           this.copyToClipboard(prompt);
           this.focusReaderPaneFrame(reader);
           this.focusClaudeEditorInReaderPane(reader);
-          this.runAppleScript(this.getPasteAppleScript("", true), true);
+          this.runPasteKeystroke("", true, true);
         }
         finally {
           this.pasteTimers = this.pasteTimers.filter((candidate) => candidate !== timer);
@@ -2634,7 +3157,7 @@ var ZoteroAIReading = {
           this.copyToClipboard(prompt);
           this.focusReaderPaneFrame(reader);
           this.focusClaudeEditorInReaderPane(reader);
-          this.runAppleScript(this.getPasteAppleScript("", true), true);
+          this.runPasteKeystroke("", true, true);
         }
         finally {
           this.pasteTimers = this.pasteTimers.filter((candidate) => candidate !== timer);
@@ -3538,11 +4061,52 @@ var ZoteroAIReading = {
   }
 
   function isAttachmentUploadSignalText(text) {
-    return !/(failed|失败|不支持|unsupported|corrupt|损坏|error|错误|格式不支持|too large|exceed|exceeded|超出|过大)/i.test(text);
+    return !/(failed|unsupported|corrupt|error|too large|exceed|exceeded|already|duplicate|exists|same file|previously|cannot upload|can't upload)/i.test(text);
   }
 
-  function matchesAttachmentText(text, needles) {
-    const hasPdfContext = /\\.pdf\\b|pdf|uploaded|attached|file|document|附件|上传|文件|文档/.test(text);
+  function getAttachmentElementHint(element) {
+    return normalize([
+      element.getAttribute("aria-label"),
+      element.getAttribute("title"),
+      element.getAttribute("data-testid"),
+      element.getAttribute("data-filename"),
+      element.getAttribute("data-file-name"),
+      element.getAttribute("data-file-id"),
+      element.getAttribute("data-attachment-id"),
+      element.id,
+      element.className
+    ].map((value) => String(value || "")).join(" "));
+  }
+
+  function isLikelyAttachmentElement(element, text) {
+    let current = element;
+    for (let depth = 0; current && depth < 4; depth++) {
+      const tag = String(current.tagName || "").toLowerCase();
+      const role = String(current.getAttribute("role") || "").toLowerCase();
+      const hint = getAttachmentElementHint(current);
+      if (
+        current.hasAttribute("data-filename") ||
+        current.hasAttribute("data-file-name") ||
+        current.hasAttribute("data-file-id") ||
+        current.hasAttribute("data-attachment-id") ||
+        /attach|attachment|paperclip|upload|file|document|pdf|chip|pill/.test(hint) ||
+        ((tag === "button" || tag === "a" || role === "button" || role === "listitem") && /\\.pdf\\b|pdf|file|document/.test(text))
+      ) {
+        return true;
+      }
+      current = current.parentElement;
+    }
+    return false;
+  }
+
+  function matchesAttachmentText(text, needles, element) {
+    if (!isAttachmentUploadSignalText(text) || !isLikelyAttachmentElement(element, text)) {
+      return false;
+    }
+    if (text.length > 520 && !/\\.pdf\\b/.test(text)) {
+      return false;
+    }
+    const hasPdfContext = /\\.pdf\\b|pdf|uploaded|attached|file|document/.test(text);
     if (hasPdfContext && needles.some((needle) => needle.length >= 6 && text.includes(needle))) {
       return true;
     }
@@ -3587,7 +4151,7 @@ var ZoteroAIReading = {
           if (!text) {
             continue;
           }
-          if (matchesAttachmentText(text, needles) && isAttachmentUploadSignalText(text)) {
+          if (matchesAttachmentText(text, needles, element)) {
             return true;
           }
         }
@@ -4012,7 +4576,32 @@ var ZoteroAIReading = {
   }
 
   function getVisibleText(element) {
-    return normalize(element && (element.innerText || element.textContent || ""));
+    if (!element) {
+      return "";
+    }
+    const pieces = [
+      element.innerText || "",
+      element.textContent || "",
+      element.getAttribute && element.getAttribute("title"),
+      element.getAttribute && element.getAttribute("aria-label"),
+      element.getAttribute && element.getAttribute("data-filename"),
+      element.getAttribute && element.getAttribute("data-file-name")
+    ];
+    return normalize(pieces.filter(Boolean).join(" "));
+  }
+
+  function getAttachmentElementHint(element) {
+    return normalize([
+      element.getAttribute("aria-label"),
+      element.getAttribute("title"),
+      element.getAttribute("data-testid"),
+      element.getAttribute("data-filename"),
+      element.getAttribute("data-file-name"),
+      element.getAttribute("data-file-id"),
+      element.getAttribute("data-attachment-id"),
+      element.id,
+      element.className
+    ].map((value) => String(value || "")).join(" "));
   }
 
   function buildNeedles(fileName) {
@@ -4030,24 +4619,58 @@ var ZoteroAIReading = {
   }
 
   function isAttachmentUploadSignalText(text) {
-    return !/(failed|失败|不支持|unsupported|corrupt|损坏|error|错误|格式不支持)/i.test(text);
+    return !/(failed|unsupported|corrupt|error|too large|exceed|exceeded|already|duplicate|exists|same file|previously|cannot upload|can't upload)/i.test(text);
+  }
+
+  function isLikelyAttachmentElement(element, text) {
+    let current = element;
+    for (let depth = 0; current && depth < 4; depth++) {
+      const tag = String(current.tagName || "").toLowerCase();
+      const role = String(current.getAttribute("role") || "").toLowerCase();
+      const hint = getAttachmentElementHint(current);
+      if (
+        current.hasAttribute("data-filename") ||
+        current.hasAttribute("data-file-name") ||
+        current.hasAttribute("data-file-id") ||
+        current.hasAttribute("data-attachment-id") ||
+        /attach|attachment|paperclip|upload|file|document|pdf|chip|pill/.test(hint) ||
+        ((tag === "button" || tag === "a" || role === "button" || role === "listitem") && /\\.pdf\\b|pdf|file|document/.test(text))
+      ) {
+        return true;
+      }
+      current = current.parentElement;
+    }
+    return false;
+  }
+
+  function matchesAttachmentText(text, needles, element) {
+    if (!isAttachmentUploadSignalText(text) || !isLikelyAttachmentElement(element, text)) {
+      return false;
+    }
+    if (text.length > 520 && !/\\.pdf\\b/.test(text)) {
+      return false;
+    }
+    return (
+      (text.includes(".pdf") && needles.some((needle) => text.includes(needle.slice(0, Math.min(needle.length, 40))))) ||
+      needles.some((needle) => needle.length >= 12 && text.includes(needle))
+    );
   }
 
   function hasAttachment(fileName) {
     const needles = buildNeedles(fileName);
     const selectors = [
-      "[class*='file']",
-      "[class*='File']",
-      "[class*='attach']",
-      "[class*='Attach']",
-      "[class*='upload']",
-      "[class*='Upload']",
-      "[class*='document']",
-      "[class*='Document']",
+      "[data-filename]",
+      "[data-file-name]",
+      "[data-file-id]",
+      "[data-attachment-id]",
+      "[data-testid]",
+      "[aria-label]",
       "[title]",
+      "[class]",
       "button",
-      "span",
-      "div"
+      "a",
+      "[role='button']",
+      "[role='listitem']"
     ];
     for (const selector of selectors) {
       try {
@@ -4059,11 +4682,7 @@ var ZoteroAIReading = {
           if (!text) {
             continue;
           }
-          const matches = (
-            (text.includes(".pdf") && needles.some((needle) => text.includes(needle.slice(0, Math.min(needle.length, 40))))) ||
-            needles.some((needle) => needle.length >= 12 && text.includes(needle))
-          );
-          if (matches && isAttachmentUploadSignalText(text)) {
+          if (matchesAttachmentText(text, needles, element)) {
             return true;
           }
         }
@@ -4783,11 +5402,7 @@ var ZoteroAIReading = {
     };
     let pasteNow = (wait = true, onComplete = null) => {
       focusBeforePaste();
-      let script = this.getPasteAppleScript(aiURL, allowZotero);
-      if (onComplete) {
-        return this.runAppleScriptAsync(script, onComplete);
-      }
-      return this.runAppleScript(script, wait);
+      return this.runPasteKeystroke(aiURL, allowZotero, wait, onComplete);
     };
 
     if (options.transferMode === "file" && options.pdfPath) {
@@ -4818,20 +5433,13 @@ var ZoteroAIReading = {
                 pasteNow(false);
               };
               if (options.readerPaneReader && options.pdfPath) {
-                let isGeminiReaderPane = this.isGeminiURL(aiURL);
-                let attachmentTimeout = isGeminiReaderPane ? 2000 : 18000;
-                Promise.resolve(this.waitForReaderPanePDFAttachment(options.readerPaneReader, options.pdfPath, attachmentTimeout))
-                  .then((attached) => {
-                    if (attached || isGeminiReaderPane) {
-                      pastePrompt();
-                    }
-                    else {
-                      this.log("Reader pane PDF attachment was not detected; prompt paste skipped to avoid text-only state");
-                    }
-                  })
-                  .catch((error) => {
-                    this.log("Reader pane PDF attachment check failed: " + (error.stack || error.message || String(error)));
-                  });
+                this.pastePromptAfterReaderPanePDFAttachment(
+                  options.readerPaneReader,
+                  options.pdfPath,
+                  pastePrompt,
+                  this.isGeminiURL(aiURL) ? 2000 : 2500,
+                  this.isGeminiURL(aiURL) ? 3000 : 6000
+                );
               }
               else {
                 pastePrompt();
@@ -4851,6 +5459,34 @@ var ZoteroAIReading = {
           this.pastePDFFileIntoBrowserAsync(aiURL, options.pdfPath, (pasted) => afterFilePaste(attempt, pasted));
           return;
         }
+        if (options.readerPaneReader) {
+          Promise.resolve(
+            !options.forceNewConversation
+              ? this.isReaderPanePDFAlreadyAttached(options.readerPaneReader, options.pdfPath, 900)
+              : false
+          )
+            .then((alreadyAttached) => {
+              if (alreadyAttached) {
+                this.log("Reader pane already has this PDF attached; skipping duplicate PDF paste");
+                afterFilePaste(attempt, true);
+                return;
+              }
+              this.pastePDFFileClipboardIntoFocusedReaderPaneNow(
+                options.readerPaneReader,
+                options.pdfPath,
+                (pasted) => afterFilePaste(attempt, pasted)
+              );
+            })
+            .catch((error) => {
+              this.log("Reader pane duplicate PDF check failed: " + (error.stack || error.message || String(error)));
+              this.pastePDFFileClipboardIntoFocusedReaderPaneNow(
+                options.readerPaneReader,
+                options.pdfPath,
+                (pasted) => afterFilePaste(attempt, pasted)
+              );
+            });
+          return;
+        }
         this.copyPDFFileToClipboard(options.pdfPath);
         afterFilePaste(attempt, pasteNow(true));
       };
@@ -4863,6 +5499,11 @@ var ZoteroAIReading = {
       }
       return;
     }
+    if (!options.prompt) {
+      this.log("No prompt available for non-file transfer; paste skipped");
+      return;
+    }
+    this.copyToClipboard(options.prompt);
     pasteNow(false);
   },
 
@@ -4885,7 +5526,7 @@ var ZoteroAIReading = {
       filePasteDelay: 0,
       filePasteAttempts: 1,
       filePasteRetryDelay: 1200,
-      promptPasteDelay: 1600
+      promptPasteDelay: options.readerPaneReader ? 500 : 1600
     };
 
     if (this.isChatGLMURL(aiURL)) {
@@ -5015,6 +5656,12 @@ var ZoteroAIReading = {
 
   copyPDFFileToSystemClipboard(pdfPath) {
     try {
+      if (this.isWindows()) {
+        return this.runPowerShell(this.getSetFileClipboardPowerShell(pdfPath), true);
+      }
+      if (!this.isMac()) {
+        return false;
+      }
       return this.runAppleScript(this.getSetFileClipboardAppleScript(pdfPath), true);
     }
     catch (error) {
@@ -5025,6 +5672,15 @@ var ZoteroAIReading = {
 
   copyPDFFileToSystemClipboardAsync(pdfPath, onComplete = null) {
     try {
+      if (this.isWindows()) {
+        return this.runPowerShellAsync(this.getSetFileClipboardPowerShell(pdfPath), onComplete);
+      }
+      if (!this.isMac()) {
+        if (onComplete) {
+          onComplete(false);
+        }
+        return false;
+      }
       return this.runAppleScriptAsync(this.getSetFileClipboardAppleScript(pdfPath), onComplete);
     }
     catch (error) {
@@ -5041,6 +5697,18 @@ var ZoteroAIReading = {
 
   pastePDFFileIntoBrowserAsync(aiURL, pdfPath, onComplete = null) {
     try {
+      if (this.isWindows()) {
+        return this.runPowerShellAsync(
+          this.getSetFileClipboardPowerShell(pdfPath).concat(this.getPastePowerShell(aiURL, false)),
+          onComplete
+        );
+      }
+      if (!this.isMac()) {
+        if (onComplete) {
+          onComplete(false);
+        }
+        return false;
+      }
       return this.runAppleScriptAsync(
         this.getSetFileClipboardAppleScript(pdfPath).concat(this.getPasteAppleScript(aiURL, false)),
         onComplete
@@ -5056,6 +5724,52 @@ var ZoteroAIReading = {
       }
       return false;
     }
+  },
+
+  activateReaderPaneWebView(webView) {
+    if (!webView) {
+      return false;
+    }
+    try {
+      webView.docShellIsActive = true;
+    }
+    catch (_) {}
+    try {
+      webView.setAttribute("tabindex", "0");
+    }
+    catch (_) {}
+    try {
+      webView.style.setProperty("pointer-events", "auto", "important");
+    }
+    catch (_) {}
+    try {
+      webView.focus();
+    }
+    catch (_) {}
+    return true;
+  },
+
+  runPasteKeystroke(aiURL, allowZotero, wait = false, onComplete = null) {
+    if (this.isWindows()) {
+      let script = this.getPastePowerShell(aiURL, allowZotero);
+      if (onComplete) {
+        return this.runPowerShellAsync(script, onComplete);
+      }
+      return this.runPowerShell(script, wait);
+    }
+
+    if (this.isMac()) {
+      let script = this.getPasteAppleScript(aiURL, allowZotero);
+      if (onComplete) {
+        return this.runAppleScriptAsync(script, onComplete);
+      }
+      return this.runAppleScript(script, wait);
+    }
+
+    if (onComplete) {
+      onComplete(false);
+    }
+    return false;
   },
 
   copyPDFFileToZoteroClipboard(pdfPath) {
@@ -5130,6 +5844,80 @@ var ZoteroAIReading = {
     ];
   },
 
+  getSetFileClipboardPowerShell(pdfPath) {
+    return [
+      "$ErrorActionPreference = 'Stop'",
+      "Add-Type -AssemblyName System.Windows.Forms",
+      "$pdfPath = " + this.powerShellQuote(pdfPath),
+      "if (-not [System.IO.File]::Exists($pdfPath)) { throw ('The PDF file does not exist: ' + $pdfPath) }",
+      "$files = New-Object System.Collections.Specialized.StringCollection",
+      "[void]$files.Add($pdfPath)",
+      "$lastError = $null",
+      "for ($i = 0; $i -lt 10; $i++) {",
+      "  try {",
+      "    [System.Windows.Forms.Clipboard]::Clear()",
+      "    [System.Windows.Forms.Clipboard]::SetFileDropList($files)",
+      "    $lastError = $null",
+      "    break",
+      "  }",
+      "  catch {",
+      "    $lastError = $_",
+      "    Start-Sleep -Milliseconds 120",
+      "  }",
+      "}",
+      "if ($lastError) { throw $lastError }"
+    ];
+  },
+
+  getPastePowerShell(aiURL, allowZotero) {
+    void aiURL;
+    let lines = [
+      "$ErrorActionPreference = 'Stop'",
+      "Add-Type -AssemblyName System.Windows.Forms"
+    ];
+
+    if (allowZotero) {
+      return lines.concat([
+        "Start-Sleep -Milliseconds 30",
+        "[System.Windows.Forms.SendKeys]::SendWait('^v')"
+      ]);
+    }
+
+    return lines.concat([
+      "Add-Type -TypeDefinition @\"",
+      "using System;",
+      "using System.Runtime.InteropServices;",
+      "public static class ZoteroAIReadingWin32 {",
+      "  [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow();",
+      "  [DllImport(\"user32.dll\")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);",
+      "}",
+      "\"@",
+      "function Get-ForegroundProcessName {",
+      "  $handle = [ZoteroAIReadingWin32]::GetForegroundWindow()",
+      "  if ($handle -eq [IntPtr]::Zero) { return '' }",
+      "  [uint32]$processId = 0",
+      "  [void][ZoteroAIReadingWin32]::GetWindowThreadProcessId($handle, [ref]$processId)",
+      "  if ($processId -eq 0) { return '' }",
+      "  try { return (Get-Process -Id $processId -ErrorAction Stop).ProcessName } catch { return '' }",
+      "}",
+      "$skipProcesses = @('zotero', 'powershell', 'pwsh', 'windowsterminal', 'openconsole')",
+      "$browserProcesses = @('chrome', 'msedge', 'firefox', 'brave', 'bravebrowser', 'arc', 'dia', 'chatgpt', 'msedgewebview2')",
+      "for ($i = 1; $i -le 80; $i++) {",
+      "  $frontProcess = [string](Get-ForegroundProcessName)",
+      "  $frontProcess = $frontProcess.ToLowerInvariant()",
+      "  if ($frontProcess -and ($skipProcesses -notcontains $frontProcess)) {",
+      "    if (($browserProcesses -contains $frontProcess) -or $i -gt 20) {",
+      "      Start-Sleep -Milliseconds 350",
+      "      [System.Windows.Forms.SendKeys]::SendWait('^v')",
+      "      exit 0",
+      "    }",
+      "  }",
+      "  Start-Sleep -Milliseconds 200",
+      "}",
+      "throw 'Target browser did not become frontmost'"
+    ]);
+  },
+
   runAppleScript(lines, wait = false) {
     let executable = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
     executable.initWithPath("/usr/bin/osascript");
@@ -5190,10 +5978,189 @@ var ZoteroAIReading = {
     }
   },
 
+  getWindowsPowerShellExecutable() {
+    let candidates = [];
+    try {
+      let windowsDir = Services.dirsvc.get("WinD", Ci.nsIFile);
+      candidates.push(this.appendPathParts(windowsDir, ["System32", "WindowsPowerShell", "v1.0", "powershell.exe"]));
+      candidates.push(this.appendPathParts(windowsDir, ["Sysnative", "WindowsPowerShell", "v1.0", "powershell.exe"]));
+    }
+    catch (_) {}
+
+    let windir = this.createLocalFile(this.getEnvironmentVariable("WINDIR"));
+    if (windir) {
+      candidates.push(this.appendPathParts(windir, ["System32", "WindowsPowerShell", "v1.0", "powershell.exe"]));
+      candidates.push(this.appendPathParts(windir, ["Sysnative", "WindowsPowerShell", "v1.0", "powershell.exe"]));
+    }
+
+    for (let executable of candidates) {
+      try {
+        if (executable?.exists?.() && executable.isFile()) {
+          return executable;
+        }
+      }
+      catch (_) {}
+    }
+
+    throw new Error("Windows PowerShell was not found");
+  },
+
+  getWindowsScriptHostExecutable() {
+    let candidates = [];
+    try {
+      let windowsDir = Services.dirsvc.get("WinD", Ci.nsIFile);
+      candidates.push(this.appendPathParts(windowsDir, ["System32", "wscript.exe"]));
+      candidates.push(this.appendPathParts(windowsDir, ["Sysnative", "wscript.exe"]));
+    }
+    catch (_) {}
+
+    let windir = this.createLocalFile(this.getEnvironmentVariable("WINDIR"));
+    if (windir) {
+      candidates.push(this.appendPathParts(windir, ["System32", "wscript.exe"]));
+      candidates.push(this.appendPathParts(windir, ["Sysnative", "wscript.exe"]));
+    }
+
+    for (let executable of candidates) {
+      try {
+        if (executable?.exists?.() && executable.isFile()) {
+          return executable;
+        }
+      }
+      catch (_) {}
+    }
+
+    throw new Error("Windows Script Host was not found");
+  },
+
+  getPowerShellCommandLine(lines) {
+    let executable = this.getWindowsPowerShellExecutable();
+    let args = [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-STA",
+      "-WindowStyle",
+      "Hidden",
+      "-EncodedCommand",
+      this.encodePowerShellCommand(lines.join("\r\n"))
+    ];
+    return [this.windowsCommandQuote(executable.path)]
+      .concat(args.map((arg) => this.windowsCommandQuote(arg)))
+      .join(" ");
+  },
+
+  createHiddenPowerShellVBS(lines, waitForPowerShell) {
+    let scriptFile = this.getTempFileWithExtension("zotero-ai-reading-ps", ".vbs");
+    let command = this.getPowerShellCommandLine(lines);
+    let script = [
+      "Option Explicit",
+      "Dim shell, fso, command, exitCode",
+      "command = " + this.vbScriptQuote(command),
+      "Set shell = CreateObject(\"WScript.Shell\")",
+      waitForPowerShell
+        ? "exitCode = shell.Run(command, 0, True)"
+        : "exitCode = 0: shell.Run command, 0, False",
+      "On Error Resume Next",
+      "Set fso = CreateObject(\"Scripting.FileSystemObject\")",
+      "fso.DeleteFile WScript.ScriptFullName, True",
+      "WScript.Quit exitCode"
+    ].join("\r\n");
+    this.writeTextFile(scriptFile, script);
+    return scriptFile;
+  },
+
+  runPowerShell(lines, wait = false) {
+    let executable = this.getWindowsScriptHostExecutable();
+    let scriptFile = this.createHiddenPowerShellVBS(lines, Boolean(wait));
+    let process = Cc["@mozilla.org/process/util;1"].createInstance(Ci.nsIProcess);
+    process.init(executable);
+
+    let args = ["//B", "//Nologo", scriptFile.path];
+    process.run(Boolean(wait), args, args.length);
+    if (wait) {
+      try {
+        if (scriptFile.exists()) {
+          scriptFile.remove(false);
+        }
+      }
+      catch (_) {}
+      return process.exitValue === 0;
+    }
+    return true;
+  },
+
+  runPowerShellAsync(lines, onComplete = null) {
+    try {
+      let executable = this.getWindowsScriptHostExecutable();
+      let scriptFile = this.createHiddenPowerShellVBS(lines, true);
+      let process = Cc["@mozilla.org/process/util;1"].createInstance(Ci.nsIProcess);
+      process.init(executable);
+
+      let args = ["//B", "//Nologo", scriptFile.path];
+      let observer = {
+        observe: () => {
+          let ok = false;
+          try {
+            ok = process.exitValue === 0;
+          }
+          catch (_) {}
+          try {
+            if (scriptFile.exists()) {
+              scriptFile.remove(false);
+            }
+          }
+          catch (_) {}
+          if (onComplete) {
+            try {
+              onComplete(ok);
+            }
+            catch (error) {
+              this.log("runPowerShellAsync callback failed: " + (error.stack || error.message || String(error)));
+            }
+          }
+        }
+      };
+      process.runAsync(args, args.length, observer, false);
+      return true;
+    }
+    catch (error) {
+      this.log("runPowerShellAsync failed: " + (error.stack || error.message || String(error)));
+      if (onComplete) {
+        try {
+          onComplete(false);
+        }
+        catch (_) {}
+      }
+      return false;
+    }
+  },
+
   copyToClipboard(text) {
     Cc["@mozilla.org/widget/clipboardhelper;1"]
       .getService(Ci.nsIClipboardHelper)
       .copyString(text);
+  },
+
+  encodePowerShellCommand(script) {
+    let bytes = "";
+    let text = String(script || "");
+    for (let i = 0; i < text.length; i++) {
+      let code = text.charCodeAt(i);
+      bytes += String.fromCharCode(code & 0xff, (code >> 8) & 0xff);
+    }
+    return btoa(bytes);
+  },
+
+  powerShellQuote(value) {
+    return "'" + String(value || "").replace(/'/g, "''") + "'";
+  },
+
+  windowsCommandQuote(value) {
+    return "\"" + String(value || "").replace(/"/g, "\\\"") + "\"";
+  },
+
+  vbScriptQuote(value) {
+    return "\"" + String(value || "").replace(/"/g, "\"\"") + "\"";
   },
 
   appleScriptQuote(value) {

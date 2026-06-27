@@ -11,5 +11,6 @@ preferences.css
 dist/*
 !dist/
 !dist/zotero-ai-reading-0.4.115.xpi
+!dist/zotero-ai-reading-0.4.136.xpi
 
 node_modules/

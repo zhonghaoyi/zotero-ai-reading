@@ -47,7 +47,7 @@ Zotero AI Reading is a Zotero 7+ plugin that sends the selected item's PDF and a
 - Copies the generated prompt to the clipboard.
 - Supports ChatGPT, Claude, Grok, Gemini, ChatGLM, DeepSeek, and custom URLs.
 - In Google Drive mode, creates a human-viewable Google Drive URL for PDFs stored under Google Drive for desktop.
-- In PDF file mode, places the local PDF file on the macOS clipboard and can paste the file before the prompt.
+- In PDF file mode, places the local PDF file on the Windows/macOS clipboard and can paste the file before the prompt.
 - Can auto-paste into configured http/https web AI pages.
 - Can open the configured web AI in a right-side Zotero reader pane for side-by-side reading.
 - Remembers changed right-pane conversation URLs per PDF and AI service, so reopening the pane can continue the existing conversation.
@@ -67,17 +67,13 @@ PDF file mode depends on the target web AI page accepting pasted files. For reli
 
 ## Install
 
-Download the current XPI from GitHub:
+Build the Windows XPI locally:
 
-[zotero-ai-reading-0.4.122.xpi](https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/main/dist/zotero-ai-reading-0.4.122.xpi)
-
-Then install it from Zotero:
-
-```text
-Tools -> Add-ons -> Install Add-on From File...
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build-xpi.ps1
 ```
 
-You can also build the XPI locally:
+If you are using a Unix-like shell, you can also run:
 
 ```bash
 sh scripts/build-xpi.sh
@@ -86,7 +82,13 @@ sh scripts/build-xpi.sh
 The generated file is:
 
 ```text
-dist/zotero-ai-reading-0.4.122.xpi
+dist/zotero-ai-reading-0.4.131.xpi
+```
+
+Then install it from Zotero:
+
+```text
+Tools -> Add-ons -> Install Add-on From File...
 ```
 
 ## Development Install
