@@ -47,7 +47,7 @@ Zotero AI Reading 是一个 Zotero 7+ 插件，用来把当前选中文献的 PD
 - 自动复制生成的提示词到剪贴板。
 - 支持 ChatGPT、Claude、Grok、Gemini、ChatGLM、DeepSeek 和自定义 URL。
 - Google Drive 模式会为 Google Drive for desktop 下的 PDF 生成可访问链接。
-- PDF 文件模式会把本地 PDF 放到 macOS 剪贴板，并可先粘贴 PDF、再粘贴提示词。
+- PDF 文件模式会把本地 PDF 放到 Windows/macOS 剪贴板，并可先粘贴 PDF、再粘贴提示词。
 - 支持向配置好的 http/https 网页 AI 自动粘贴。
 - 支持在 Zotero 阅读器右侧打开 Web AI 面板，进行左右分栏阅读。
 - 会按 PDF 和 AI 服务记录右侧面板变化后的会话 URL，再次打开时可继续历史对话。
@@ -67,17 +67,13 @@ PDF 文件模式依赖目标网页 AI 是否接受粘贴文件。如果需要跨
 
 ## 安装
 
-从 GitHub 下载当前 XPI：
+在 Windows 上从源码构建 XPI：
 
-[zotero-ai-reading-0.4.122.xpi](https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/main/dist/zotero-ai-reading-0.4.122.xpi)
-
-然后在 Zotero 中安装：
-
-```text
-Tools -> Add-ons -> Install Add-on From File...
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build-xpi.ps1
 ```
 
-也可以从源码构建：
+如果使用类 Unix shell，也可以运行：
 
 ```bash
 sh scripts/build-xpi.sh
@@ -86,7 +82,13 @@ sh scripts/build-xpi.sh
 生成文件位于：
 
 ```text
-dist/zotero-ai-reading-0.4.122.xpi
+dist/zotero-ai-reading-0.4.131.xpi
+```
+
+然后在 Zotero 中安装：
+
+```text
+Tools -> Add-ons -> Install Add-on From File...
 ```
 
 ## 开发安装
