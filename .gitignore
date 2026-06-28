@@ -10,6 +10,6 @@ preferences.css
 # Keep the current public install package only.
 dist/*
 !dist/
-!dist/zotero-ai-reading-0.4.115.xpi
+!dist/zotero-ai-reading-0.4.122.xpi
 
 node_modules/

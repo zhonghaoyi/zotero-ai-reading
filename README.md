@@ -71,6 +71,8 @@ PDF 文件模式依赖目标网页 AI 是否接受粘贴文件。如果需要跨
 
 [zotero-ai-reading-0.4.122.xpi](https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/main/dist/zotero-ai-reading-0.4.122.xpi)
 
+请确认下载到的是 `.xpi` 文件，不是 GitHub 的 `Source code` 压缩包、仓库页面 HTML，或被浏览器自动解压后的文件。Zotero 只能安装 XPI；如果把源码 zip 或错误文件选进 Zotero，可能会显示 `it may be incompatible with this version of Zotero`。
+
 然后在 Zotero 中安装：
 
 ```text

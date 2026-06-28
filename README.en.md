@@ -71,6 +71,8 @@ Download the current XPI from GitHub:
 
 [zotero-ai-reading-0.4.122.xpi](https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/main/dist/zotero-ai-reading-0.4.122.xpi)
 
+Make sure the downloaded file is the `.xpi` file, not GitHub's `Source code` archive, a repository HTML page, or a file automatically unzipped by the browser. Zotero can only install the XPI; selecting a source zip or the wrong downloaded file may show `it may be incompatible with this version of Zotero`.
+
 Then install it from Zotero:
 
 ```text
