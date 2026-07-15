@@ -2790,6 +2790,10 @@ var ZoteroAIReading = {
       return this.pasteIntoChatGLMReaderPane(reader, options);
     }
 
+    if (this.shouldUseLegacyReaderPanePaste(reader, options)) {
+      return this.pasteIntoLegacyReaderPane(reader, options);
+    }
+
     if (this.shouldUseGeminiReaderPanePaste(reader, options)) {
       return this.pasteIntoGeminiReaderPane(reader, options);
     }
@@ -2799,37 +2803,54 @@ var ZoteroAIReading = {
     }
 
     if (options.transferMode === "file" && options.pdfPath) {
-      await this.waitForReaderPaneEditorReady(reader, 2500, 10);
+      let aiURL = options.aiURL || this.getReaderPaneURL(reader) || this.getAIURL();
+      await this.waitForReaderPaneEditorReady(reader, 1200, 5);
       let alreadyAttached =
         !options.forceNewConversation &&
-        await this.isReaderPanePDFAlreadyAttached(reader, options.pdfPath, 900);
+        !options.readerPaneLoadedFresh &&
+        await this.isReaderPanePDFAlreadyAttached(reader, options.pdfPath, 600);
       if (!alreadyAttached) {
         // Robust DOM upload first: the injected frame script sets the page input
         // type=file directly, so it works without a user gesture, OS clipboard, or a
         // synthetic Ctrl+V -- the things that made timer-triggered auto-paste miss on
         // ChatGPT while a manual click still worked. Same path that already makes
         // ChatGLM auto-upload reliable; clipboard paste stays only as a fallback.
-        let uploaded =
-          await this.uploadPDFFileIntoReaderPaneByDOM(reader, options.pdfPath) ||
-          await this.pastePDFFileClipboardIntoReaderPaneAndWait(reader, options.pdfPath);
+        let domUpload = await this.uploadPDFFileIntoReaderPaneByDOM(reader, options.pdfPath, true);
+        let uploaded = Boolean(domUpload?.ok);
+        if (uploaded && domUpload.reason === "input-selected") {
+          let attachmentTimeout = this.isClaudeURL(aiURL) ? 5000 : 3500;
+          let attachmentDetected =
+            await this.waitForReaderPanePDFAttachment(reader, options.pdfPath, attachmentTimeout);
+          if (!attachmentDetected) {
+            this.log("PDF input accepted but attachment chip was not detected; continuing with prompt after upload settle wait");
+          }
+        }
         if (!uploaded) {
-          return false;
+          uploaded = await this.pastePDFFileClipboardIntoFocusedReaderPane(reader, options.pdfPath);
+        }
+        if (!uploaded) {
+          this.log("Reader pane PDF upload was not detected; prompt paste skipped to avoid text-only state");
+          this.copyPDFFileToClipboardAsync(options.pdfPath);
+          return true;
         }
       }
       else {
         this.log("Reader pane already has this PDF attached; skipping duplicate PDF paste");
       }
       if (options.prompt) {
-        if (alreadyAttached) {
-          this.pasteTextClipboardIntoClaudeReaderPane(reader, options.prompt, 300);
+        if (this.isClaudeURL(aiURL)) {
+          // Claude's ProseMirror editor can briefly retain a synthetic DOM write
+          // and then restore its framework state. Use an acknowledged focus plus
+          // a real clipboard paste for Claude so the editor receives trusted key
+          // events after the attachment UI has finished rebuilding.
+          await this.waitForReaderPaneEditorReady(reader, 5000, 20);
+          this.pasteTextClipboardIntoReaderPane(reader, options.prompt, alreadyAttached ? 300 : 600);
         }
         else {
-          this.pastePromptAfterReaderPanePDFAttachment(
+          this.pasteTextIntoReaderPaneEditorOrClipboard(
             reader,
-            options.pdfPath,
-            () => this.pasteTextClipboardIntoClaudeReaderPane(reader, options.prompt, 300),
-            2500,
-            6000
+            options.prompt,
+            alreadyAttached ? 300 : 400
           );
         }
       }
@@ -2837,6 +2858,50 @@ var ZoteroAIReading = {
     }
 
     return this.pasteTextClipboardIntoClaudeReaderPane(reader, options.prompt || "", 600);
+  },
+
+  async pasteIntoLegacyReaderPane(reader, options = {}) {
+    if (!options.prompt) {
+      return false;
+    }
+
+    if (options.transferMode === "file" && options.pdfPath) {
+      // Claude, DeepSeek, and Gemini all worked through this sequence in 0.4.136.
+      // Keep it isolated from ChatGPT's newer DOM-first upload flow.
+      await this.waitForReaderPaneEditorReady(reader, 2500, 10);
+      let alreadyAttached =
+        !options.forceNewConversation &&
+        await this.isReaderPanePDFAlreadyAttached(reader, options.pdfPath, 900);
+      if (!alreadyAttached) {
+        let uploaded =
+          await this.uploadPDFFileIntoReaderPaneByDOM(reader, options.pdfPath) ||
+          await this.pastePDFFileClipboardIntoReaderPaneAndWait(reader, options.pdfPath);
+        if (!uploaded) {
+          // Returning false deliberately re-opens the unchanged 0.4.136
+          // pasteWithOptions fallback in pasteIntoReaderPane.
+          return false;
+        }
+      }
+      else {
+        this.log("Reader pane already has this PDF attached; skipping duplicate PDF paste");
+      }
+
+      if (alreadyAttached) {
+        this.pasteTextClipboardIntoLegacyReaderPane(reader, options.prompt, 300);
+      }
+      else {
+        this.pastePromptAfterLegacyReaderPanePDFAttachment(
+          reader,
+          options.pdfPath,
+          () => this.pasteTextClipboardIntoLegacyReaderPane(reader, options.prompt, 300),
+          2500,
+          6000
+        );
+      }
+      return true;
+    }
+
+    return this.pasteTextClipboardIntoLegacyReaderPane(reader, options.prompt, 600);
   },
 
   async pasteIntoChatGLMReaderPane(reader, options = {}) {
@@ -2896,10 +2961,10 @@ var ZoteroAIReading = {
     }
   },
 
-  uploadPDFFileIntoReaderPaneByDOM(reader, pdfPath) {
+  uploadPDFFileIntoReaderPaneByDOM(reader, pdfPath, returnDetails = false) {
     return new Promise((resolve) => {
       let settled = false;
-      let done = (ok) => {
+      let done = (result) => {
         if (settled) {
           return;
         }
@@ -2912,7 +2977,11 @@ var ZoteroAIReading = {
           messageManager?.removeMessageListener?.(replyName, onReply);
         }
         catch (_) {}
-        resolve(Boolean(ok));
+        let data =
+          result && typeof result === "object"
+            ? Object.assign({ ok: false, reason: "unknown" }, result)
+            : { ok: Boolean(result), reason: result ? "ok" : "failed" };
+        resolve(returnDetails ? data : Boolean(data.ok));
       };
 
       let frame = null;
@@ -2932,10 +3001,10 @@ var ZoteroAIReading = {
         let requestName = "ZoteroAIReading:UploadPDFByDOM:" + Date.now() + ":" + Math.random();
         replyName = requestName + ":Done";
         onReply = (message) => {
-          done(Boolean(message?.data?.ok));
+          done(message?.data || { ok: false, reason: "empty-reply" });
         };
         timeoutTimer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
-        timeoutTimer.initWithCallback(() => done(false), 22000, Ci.nsITimer.TYPE_ONE_SHOT);
+        timeoutTimer.initWithCallback(() => done({ ok: false, reason: "timeout" }), 22000, Ci.nsITimer.TYPE_ONE_SHOT);
         messageManager.addMessageListener(replyName, onReply);
         let scriptURL =
           "data:application/javascript;charset=utf-8," +
@@ -3007,15 +3076,18 @@ var ZoteroAIReading = {
         onReply = (message) => {
           done(Boolean(message?.data?.attached));
         };
+        let effectiveTimeoutMs = Math.max(1000, Number(timeoutMs) || 6000);
+        let probeAttempts = Math.max(0, Math.min(64, Math.ceil(effectiveTimeoutMs / 250) - 1));
         timeoutTimer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
-        timeoutTimer.initWithCallback(() => done(false), Math.max(1000, Number(timeoutMs) || 6000), Ci.nsITimer.TYPE_ONE_SHOT);
+        timeoutTimer.initWithCallback(() => done(false), effectiveTimeoutMs, Ci.nsITimer.TYPE_ONE_SHOT);
         messageManager.addMessageListener(replyName, onReply);
         let scriptURL =
           "data:application/javascript;charset=utf-8," +
           encodeURIComponent(this.getReaderPanePDFAttachmentProbeFrameScript(requestName, replyName));
         messageManager.loadFrameScript(scriptURL, false);
         messageManager.sendAsyncMessage(requestName, {
-          fileName: this.getFileName(pdfPath)
+          fileName: this.getFileName(pdfPath),
+          attempts: probeAttempts
         });
       }
       catch (error) {
@@ -3093,6 +3165,25 @@ var ZoteroAIReading = {
   },
 
   pastePromptAfterReaderPanePDFAttachment(reader, pdfPath, pastePrompt, timeoutMs = 10000, minDelayMs = 6000) {
+    void minDelayMs;
+    let startedAt = Date.now();
+    Promise.resolve(this.waitForReaderPanePDFAttachment(reader, pdfPath, timeoutMs))
+      .then((attached) => {
+        if (!attached) {
+          this.log("Reader pane PDF attachment was not detected before timeout; prompt paste skipped to avoid text-only state");
+          return;
+        }
+        let elapsed = Date.now() - startedAt;
+        let requiredDelay = 1200;
+        let remainingDelay = Math.max(0, requiredDelay - elapsed);
+        this.schedulePasteTimer(pastePrompt, remainingDelay);
+      })
+      .catch((error) => {
+        this.log("Reader pane PDF attachment wait failed: " + (error.stack || error.message || String(error)));
+      });
+  },
+
+  pastePromptAfterLegacyReaderPanePDFAttachment(reader, pdfPath, pastePrompt, timeoutMs = 10000, minDelayMs = 6000) {
     let startedAt = Date.now();
     Promise.resolve(this.waitForReaderPanePDFAttachment(reader, pdfPath, timeoutMs))
       .then((attached) => {
@@ -3114,7 +3205,7 @@ var ZoteroAIReading = {
       });
   },
 
-  pasteTextClipboardIntoClaudeReaderPane(reader, prompt, delay = 600) {
+  pasteTextClipboardIntoLegacyReaderPane(reader, prompt, delay = 600) {
     try {
       if (!prompt) {
         return false;
@@ -3140,9 +3231,13 @@ var ZoteroAIReading = {
       return true;
     }
     catch (error) {
-      this.log("pasteTextClipboardIntoClaudeReaderPane failed: " + (error.stack || error.message || String(error)));
+      this.log("pasteTextClipboardIntoLegacyReaderPane failed: " + (error.stack || error.message || String(error)));
       return false;
     }
+  },
+
+  pasteTextClipboardIntoClaudeReaderPane(reader, prompt, delay = 600) {
+    return this.pasteTextClipboardIntoReaderPane(reader, prompt, delay);
   },
 
   pasteTextClipboardIntoReaderPane(reader, prompt, delay = 600) {
@@ -3151,20 +3246,37 @@ var ZoteroAIReading = {
         return false;
       }
 
-      let timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
-      let callback = () => {
-        try {
-          this.copyToClipboard(prompt);
-          this.focusReaderPaneFrame(reader);
-          this.focusClaudeEditorInReaderPane(reader);
-          this.runPasteKeystroke("", true, true);
-        }
-        finally {
-          this.pasteTimers = this.pasteTimers.filter((candidate) => candidate !== timer);
-        }
-      };
-      timer.initWithCallback(callback, Math.max(300, delay), Ci.nsITimer.TYPE_ONE_SHOT);
-      this.pasteTimers.push(timer);
+      this.schedulePasteTimer(() => {
+        this.copyToClipboard(prompt);
+        this.focusReaderPaneFrame(reader);
+        Promise.resolve(this.focusReaderPaneEditorAndWait(reader, 5500, 22))
+          .then((focused) => {
+            let paste = () => {
+              this.runPasteKeystroke("", true, false, (ok) => {
+                if (!ok) {
+                  this.log("Reader pane clipboard paste keystroke failed");
+                }
+              });
+            };
+            if (focused) {
+              paste();
+              return;
+            }
+
+            // Last-resort compatibility path for older Zotero webviews that do
+            // not return a focus acknowledgement from frame scripts.
+            this.log("Reader pane editor focus was not acknowledged; using delayed paste fallback");
+            this.focusReaderPaneFrame(reader);
+            this.focusClaudeEditorInReaderPane(reader);
+            this.schedulePasteTimer(paste, 300);
+          })
+          .catch((error) => {
+            this.log("Reader pane acknowledged focus failed: " + (error.stack || error.message || String(error)));
+            this.focusReaderPaneFrame(reader);
+            this.focusClaudeEditorInReaderPane(reader);
+            this.schedulePasteTimer(() => this.runPasteKeystroke("", true, false), 300);
+          });
+      }, Math.max(300, delay));
       return true;
     }
     catch (error) {
@@ -3212,6 +3324,14 @@ var ZoteroAIReading = {
     }
     let aiURL = options.aiURL || this.getReaderPaneURL(reader) || this.getAIURL();
     return this.isClaudeURL(aiURL);
+  },
+
+  shouldUseLegacyReaderPanePaste(reader, options = {}) {
+    if (!options.prompt) {
+      return false;
+    }
+    let aiURL = options.aiURL || this.getReaderPaneURL(reader) || this.getAIURL();
+    return this.isClaudeURL(aiURL) || this.isDeepSeekURL(aiURL) || this.isGeminiURL(aiURL);
   },
 
   shouldUseGeminiReaderPanePaste(reader, options = {}) {
@@ -3299,7 +3419,7 @@ var ZoteroAIReading = {
           done(Boolean(message?.data?.ok));
         };
         timeoutTimer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
-        timeoutTimer.initWithCallback(() => done(false), 5000, Ci.nsITimer.TYPE_ONE_SHOT);
+        timeoutTimer.initWithCallback(() => done(false), 7500, Ci.nsITimer.TYPE_ONE_SHOT);
         messageManager.addMessageListener(replyName, onReply);
         let scriptURL =
           "data:application/javascript;charset=utf-8," +
@@ -3433,6 +3553,61 @@ var ZoteroAIReading = {
     }
   },
 
+  focusReaderPaneEditorAndWait(reader, timeoutMs = 5000, attempts = 20) {
+    return new Promise((resolve) => {
+      let settled = false;
+      let done = (focused) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        try {
+          timeoutTimer?.cancel?.();
+        }
+        catch (_) {}
+        try {
+          messageManager?.removeMessageListener?.(replyName, onReply);
+        }
+        catch (_) {}
+        resolve(Boolean(focused));
+      };
+
+      let messageManager = null;
+      let replyName = "";
+      let onReply = null;
+      let timeoutTimer = null;
+
+      try {
+        let frame = this.getReaderPaneFrameForReader(reader);
+        messageManager = frame?.messageManager || frame?.frameLoader?.messageManager;
+        if (!messageManager?.loadFrameScript || !messageManager?.sendAsyncMessage || !messageManager?.addMessageListener) {
+          done(false);
+          return;
+        }
+
+        let requestName = "ZoteroAIReading:FocusEditorAndWait:" + Date.now() + ":" + Math.random();
+        replyName = requestName + ":Done";
+        onReply = (message) => done(Boolean(message?.data?.focused));
+        timeoutTimer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
+        timeoutTimer.initWithCallback(
+          () => done(false),
+          Math.max(500, Number(timeoutMs) || 5000),
+          Ci.nsITimer.TYPE_ONE_SHOT
+        );
+        messageManager.addMessageListener(replyName, onReply);
+        let scriptURL =
+          "data:application/javascript;charset=utf-8," +
+          encodeURIComponent(this.getClaudeEditorFocusFrameScript(requestName, replyName, attempts));
+        messageManager.loadFrameScript(scriptURL, false);
+        messageManager.sendAsyncMessage(requestName, {});
+      }
+      catch (error) {
+        this.log("focusReaderPaneEditorAndWait failed: " + (error.stack || error.message || String(error)));
+        done(false);
+      }
+    });
+  },
+
   waitForReaderPaneEditorReady(reader, timeoutMs = 5000, attempts = 20) {
     return new Promise((resolve) => {
       let settled = false;
@@ -3502,8 +3677,25 @@ var ZoteroAIReading = {
   }
 
   function getFileName(path) {
-    const parts = String(path || "").split("/");
+    const parts = String(path || "").split(/[\\\\/]/);
     return parts[parts.length - 1] || "document.pdf";
+  }
+
+  function getUploadPreparationState() {
+    const host = String(content.location && content.location.hostname || "").toLowerCase();
+    if (host === "chatgpt.com" || host.endsWith(".chatgpt.com") || host === "chat.openai.com") {
+      return { site: "chatgpt", allowUIClick: true, explicitOnly: false, menuOpened: false, localOptionClicked: false, attemptsLeft: 10, retryDelay: 200 };
+    }
+    if (host === "chatglm.cn" || host.endsWith(".chatglm.cn")) {
+      return { site: "chatglm", allowUIClick: true, explicitOnly: false, menuOpened: false, localOptionClicked: false, attemptsLeft: 20, retryDelay: 250 };
+    }
+    if (host === "chat.deepseek.com" || host.endsWith(".chat.deepseek.com")) {
+      return { site: "deepseek", allowUIClick: true, explicitOnly: false, menuOpened: false, localOptionClicked: false, attemptsLeft: 16, retryDelay: 250 };
+    }
+    if (host === "gemini.google.com" || host.endsWith(".gemini.google.com")) {
+      return { site: "gemini", allowUIClick: true, explicitOnly: true, menuOpened: false, localOptionClicked: false, attemptsLeft: 16, retryDelay: 250 };
+    }
+    return { site: "other", allowUIClick: false, explicitOnly: true, menuOpened: false, localOptionClicked: false, attemptsLeft: 0, retryDelay: 0 };
   }
 
   function isVisible(element) {
@@ -3518,6 +3710,50 @@ var ZoteroAIReading = {
     return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
   }
 
+  function collectOpenRoots(start = content.document) {
+    const roots = [];
+    const queue = [start];
+    const visited = new Set();
+    while (queue.length) {
+      const root = queue.shift();
+      if (!root || visited.has(root) || !root.querySelectorAll) {
+        continue;
+      }
+      visited.add(root);
+      roots.push(root);
+      try {
+        for (const element of root.querySelectorAll("*")) {
+          if (element.shadowRoot) {
+            queue.push(element.shadowRoot);
+          }
+        }
+      }
+      catch (_) {}
+    }
+    return roots;
+  }
+
+  function queryRoots(roots, selector) {
+    const results = [];
+    for (const root of roots) {
+      try {
+        for (const element of root.querySelectorAll(selector)) {
+          results.push(element);
+        }
+      }
+      catch (_) {}
+    }
+    return results;
+  }
+
+  function parentAcrossShadow(element) {
+    if (!element) {
+      return null;
+    }
+    const root = element.getRootNode && element.getRootNode();
+    return element.parentElement || (root && root.host) || null;
+  }
+
   function normalizeEditor(element) {
     if (!element) {
       return null;
@@ -3526,7 +3762,59 @@ var ZoteroAIReading = {
     if (element.isContentEditable || tag === "textarea" || tag === "input") {
       return element;
     }
-    return element.querySelector("textarea, input[type='text'], input:not([type]), [contenteditable], [role='textbox']");
+    const roots = collectOpenRoots(element.shadowRoot || element);
+    return queryRoots(
+      roots,
+      "textarea, input[type='text'], input:not([type]), [contenteditable='true'], [role='textbox'][contenteditable='true']"
+    )[0] || null;
+  }
+
+  function querySelectorAllDeep(root, selector) {
+    const results = [];
+    const queue = [root];
+    const visited = new Set();
+    while (queue.length) {
+      const current = queue.shift();
+      if (!current || visited.has(current) || !current.querySelectorAll) {
+        continue;
+      }
+      visited.add(current);
+      try {
+        for (const element of current.querySelectorAll(selector)) {
+          results.push(element);
+        }
+      }
+      catch (_) {}
+      try {
+        for (const element of current.querySelectorAll("*")) {
+          if (element.shadowRoot) {
+            queue.push(element.shadowRoot);
+          }
+        }
+      }
+      catch (_) {}
+    }
+    return results;
+  }
+
+  function isEditorEnabled(element) {
+    let current = element;
+    for (let depth = 0; current && depth < 6; depth++) {
+      const contentEditable = String(current.getAttribute && current.getAttribute("contenteditable") || "").toLowerCase();
+      if (
+        current.disabled ||
+        current.readOnly ||
+        current.hasAttribute && (current.hasAttribute("readonly") || current.hasAttribute("inert")) ||
+        contentEditable === "false" ||
+        String(current.getAttribute && current.getAttribute("aria-disabled") || "").toLowerCase() === "true" ||
+        String(current.getAttribute && current.getAttribute("data-disabled") || "").toLowerCase() === "true"
+      ) {
+        return false;
+      }
+      const nodeRoot = current.getRootNode && current.getRootNode();
+      current = current.parentElement || (nodeRoot && nodeRoot.host) || null;
+    }
+    return true;
   }
 
   function getEditorHint(element) {
@@ -3570,6 +3858,9 @@ var ZoteroAIReading = {
 
   function findEditor() {
     const selectors = [
+      "rich-textarea [contenteditable='true']",
+      ".ql-editor[contenteditable='true']",
+      "[aria-label*='Gemini'][contenteditable='true']",
       "[data-testid='chat-input']",
       "[data-testid*='chat-input']",
       "[data-testid*='input']",
@@ -3594,11 +3885,12 @@ var ZoteroAIReading = {
       "input:not([type])"
     ];
     const candidates = [];
+    const roots = collectOpenRoots();
     for (const selector of selectors) {
       try {
-        for (const element of content.document.querySelectorAll(selector)) {
+        for (const element of queryRoots(roots, selector)) {
           const editor = normalizeEditor(element);
-          if (editor && isVisible(editor)) {
+          if (editor && isVisible(editor) && isEditorEnabled(editor) && !candidates.includes(editor)) {
             candidates.push(editor);
           }
         }
@@ -3668,7 +3960,7 @@ var ZoteroAIReading = {
 	      clientX: Math.round(rect.left + rect.width / 2),
 	      clientY: Math.round(rect.top + rect.height / 2)
 	    };
-	    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+	    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
 	      try {
 	        element.dispatchEvent(new content.MouseEvent(type, eventOptions));
 	      }
@@ -3676,9 +3968,17 @@ var ZoteroAIReading = {
 	    }
 	    try {
 	      element.click();
+	      return true;
 	    }
-	    catch (_) {}
-	    return true;
+	    catch (_) {
+	      try {
+	        element.dispatchEvent(new content.MouseEvent("click", eventOptions));
+	        return true;
+	      }
+	      catch (_) {
+	        return false;
+	      }
+	    }
 	  }
 
 	  function interactiveAncestor(element) {
@@ -3696,7 +3996,7 @@ var ZoteroAIReading = {
 	      ) {
 	        return current;
 	      }
-	      current = current.parentElement;
+	      current = parentAcrossShadow(current);
 	    }
 	    return element;
 	  }
@@ -3716,11 +4016,15 @@ var ZoteroAIReading = {
 
 	  function isForbiddenAttachmentCandidate(element) {
 	    const hint = getElementHint(element);
-	    return /agent|研究报告|ppt|数据分析|创意海报|网页应用|文档智读|联网模式|alltools|all[-_\s]?tools|tool|config|setting|设置|配置|更多|快速|模式/.test(hint);
+	    return /agent|研究报告|ppt|数据分析|创意海报|网页应用|文档智读|联网模式|alltools|all[-_\\s]?tools|tool|config|setting|设置|配置|更多|快速|模式/.test(hint);
 	  }
 
 	  function isExplicitAttachmentCandidate(element) {
-	    return /attach|attachment|paperclip|upload|file|document|pdf|附件|上传|文件|本地|文档/.test(getElementHint(element));
+	    return /composer[-_\\s]?plus|add[-_\\s]?(files?|attachments?)|attach|attachment|paperclip|upload|file|document|pdf|附件|上传|文件|本地|文档/.test(getElementHint(element));
+	  }
+
+	  function isGeminiUploadOpener(element) {
+	    return /^(?:add files?|upload and tools?|添加文件|上传和工具)$|add[-_\\s]?files?|upload[-_\\s]?(?:and[-_\\s]?)?tools?|添加文件|上传和工具/i.test(getElementHint(element));
 	  }
 
 	  function isBottomLeftEditorControl(element, editorRect) {
@@ -3744,13 +4048,14 @@ var ZoteroAIReading = {
 	    return rect.top >= editorRect.bottom - Math.max(86, editorRect.height * 0.75) && rect.bottom <= editorRect.bottom + 42;
 	  }
 
-	  function findAttachmentButton() {
+	  function findAttachmentButton(state) {
 	    const editor = findEditor();
 	    const editorRect = editor && editor.getBoundingClientRect ? editor.getBoundingClientRect() : null;
-	    if (!editorRect) {
+	    if (!editorRect && !state.explicitOnly) {
 	      return null;
 	    }
 	    const raw = [];
+	    const roots = collectOpenRoots();
 	    const selectors = [
 	      "button",
 	      "[role='button']",
@@ -3770,22 +4075,41 @@ var ZoteroAIReading = {
 	    ];
 	    for (const selector of selectors) {
 	      try {
-	        for (const element of content.document.querySelectorAll(selector)) {
+	        for (const element of queryRoots(roots, selector)) {
 	          raw.push(interactiveAncestor(element));
 	        }
 	      }
 	      catch (_) {}
 	    }
-	    const candidates = uniqueElements(raw)
-	      .filter((element) => isBottomLeftEditorControl(element, editorRect))
+	    let candidates = uniqueElements(raw)
+	      .filter((element) =>
+	        isVisible(element) &&
+	        ((state.site === "gemini" && isGeminiUploadOpener(element)) || !isForbiddenAttachmentCandidate(element))
+	      )
 	      .map((element) => ({ element, rect: element.getBoundingClientRect(), explicit: isExplicitAttachmentCandidate(element) }));
+	    if (state.site === "gemini") {
+	      const geminiOpeners = candidates.filter(({ element }) => isGeminiUploadOpener(element));
+	      if (geminiOpeners.length) {
+	        geminiOpeners.sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height));
+	        return geminiOpeners[0].element;
+	      }
+	    }
+	    if (state.explicitOnly) {
+	      candidates = candidates.filter((candidate) => candidate.explicit);
+	    }
+	    else {
+	      candidates = candidates.filter((candidate) => isBottomLeftEditorControl(candidate.element, editorRect));
+	    }
+	    if (!candidates.length) {
+	      return null;
+	    }
 	    candidates.sort((a, b) => {
 	      if (a.explicit !== b.explicit) {
 	        return a.explicit ? -1 : 1;
 	      }
 	      return a.rect.left - b.rect.left || a.rect.top - b.rect.top || (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height);
 	    });
-	    if (candidates[0]?.explicit) {
+	    if (candidates[0].explicit || state.explicitOnly) {
 	      return candidates[0].element;
 	    }
 	    if (candidates.length >= 2) {
@@ -3794,19 +4118,31 @@ var ZoteroAIReading = {
 	    return null;
 	  }
 
-	  function findLocalFileOption() {
+	  function findLocalFileOption(state) {
 	    const candidates = [];
+	    const roots = collectOpenRoots();
 	    try {
-	      for (const element of content.document.querySelectorAll("button, [role='button'], [aria-label], [title], div, span, li")) {
+	      for (const element of queryRoots(roots, "button, [role='button'], [role='menuitem'], [aria-label], [title], div, span, li")) {
 	        if (!isVisible(element)) {
 	          continue;
 	        }
 	        const text = getElementHint(element);
-	        if (!/(本地文件选择|本地文件|本地上传|上传文件|local file|upload file)/i.test(text)) {
+	        if (state.site === "gemini") {
+	          if (/add[-_\\s]?files?|upload[-_\\s]?(?:and[-_\\s]?)?tools?|添加文件|上传和工具/i.test(text)) {
+	            continue;
+	          }
+	          if (!/(?:^|\\s)(?:files?|upload files?|files from (?:computer|device)|upload from (?:computer|device)|文件|上传文件|从(?:计算机|设备)上传)(?:\\s|$)/i.test(text)) {
+	            continue;
+	          }
+	          const rect = element.getBoundingClientRect();
+	          candidates.push({ element: interactiveAncestor(element), area: rect.width * rect.height });
+	          continue;
+	        }
+	        if (!/(本地文件选择|本地文件|本地上传|上传文件|从计算机上传|添加(?:照片和)?文件|local file|upload file|upload from (?:computer|device)|add (?:photos? (?:and|&) )?files?)/i.test(text)) {
 	          continue;
 	        }
 	        const rect = element.getBoundingClientRect();
-	        candidates.push({ element, area: rect.width * rect.height });
+	        candidates.push({ element: interactiveAncestor(element), area: rect.width * rect.height });
 	      }
 	    }
 	    catch (_) {}
@@ -3814,25 +4150,24 @@ var ZoteroAIReading = {
 	    return candidates[0]?.element || null;
 	  }
 
-	  function openChatGLMUploadUI() {
-	    let opened = false;
-	    const localOption = findLocalFileOption();
+	  function prepareUploadUI(state) {
+	    let prepared = false;
+	    const localOption =
+	      !state.localOptionClicked &&
+	      (state.site !== "gemini" || state.menuOpened) &&
+	      findLocalFileOption(state);
 	    if (localOption) {
-	      opened = dispatchClick(localOption) || opened;
+	      state.localOptionClicked = dispatchClick(localOption);
+	      prepared = state.localOptionClicked || prepared;
 	    }
-	    else {
-	      const attachButton = findAttachmentButton();
+	    else if (!state.menuOpened) {
+	      const attachButton = findAttachmentButton(state);
 	      if (attachButton) {
-	        opened = dispatchClick(attachButton) || opened;
-	        content.setTimeout(() => {
-	          const option = findLocalFileOption();
-	          if (option) {
-	            dispatchClick(option);
-	          }
-	        }, 120);
+	        state.menuOpened = dispatchClick(attachButton);
+	        prepared = state.menuOpened || prepared;
 	      }
 	    }
-	    return opened;
+	    return prepared;
 	  }
 
 	  function createNsFile(pdfPath) {
@@ -3867,7 +4202,7 @@ var ZoteroAIReading = {
   function dispatchInputEvents(input) {
     for (const type of ["input", "change"]) {
       try {
-        input.dispatchEvent(new content.Event(type, { bubbles: true }));
+        input.dispatchEvent(new content.Event(type, { bubbles: true, composed: true }));
       }
       catch (_) {}
     }
@@ -3904,7 +4239,34 @@ var ZoteroAIReading = {
         catch (_) {}
       }
     }
+    const dataTransfer = createDataTransfer(domFile);
+    if (dataTransfer) {
+      try {
+        const prototype = Object.getPrototypeOf(input);
+        const descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, "files");
+        if (descriptor && typeof descriptor.set === "function") {
+          descriptor.set.call(input, dataTransfer.files);
+        }
+        else {
+          Object.defineProperty(input, "files", { configurable: true, value: dataTransfer.files });
+        }
+        dispatchInputEvents(input);
+        return Boolean(input.files && input.files.length);
+      }
+      catch (_) {}
+    }
     return false;
+  }
+
+  function acceptsPDF(input) {
+    const accept = String(input.getAttribute("accept") || "").trim().toLowerCase();
+    if (!accept) {
+      return true;
+    }
+    return accept.split(",").some((part) => {
+      const value = part.trim();
+      return value === ".pdf" || value === "application/pdf" || value === "application/*" || value === "*/*" || value === "*";
+    });
   }
 
   function scoreFileInput(input) {
@@ -3917,11 +4279,17 @@ var ZoteroAIReading = {
       input.getAttribute("data-testid")
     ].map((value) => String(value || "")).join(" ").toLowerCase();
     let score = 0;
-    if (/pdf|application\\/pdf|\\*/.test(accept)) {
-      score += 200;
+    if (/pdf|application\\/pdf/.test(accept)) {
+      score += 300;
+    }
+    else if (!accept || /application\\/\\*|\\*\\/\\*|^\\*$/.test(accept)) {
+      score += 180;
     }
     if (/file|upload|attach|document|pdf|上传|附件/.test(hint)) {
       score += 120;
+    }
+    if (/upload-files|composer|attachment/.test(hint)) {
+      score += 80;
     }
     if (!input.disabled) {
       score += 40;
@@ -3930,8 +4298,8 @@ var ZoteroAIReading = {
   }
 
   function findFileInputs() {
-    const inputs = Array.from(content.document.querySelectorAll("input[type='file']"))
-      .filter((input) => !input.disabled);
+    const inputs = queryRoots(collectOpenRoots(), "input[type='file']")
+      .filter((input) => !input.disabled && acceptsPDF(input));
     inputs.sort((a, b) => scoreFileInput(b) - scoreFileInput(a));
     return inputs;
   }
@@ -4008,10 +4376,10 @@ var ZoteroAIReading = {
     const targets = [];
     if (editor) {
       targets.push(editor);
-      let parent = editor.parentElement;
+      let parent = parentAcrossShadow(editor);
       for (let i = 0; parent && i < 4; i++) {
         targets.push(parent);
-        parent = parent.parentElement;
+        parent = parentAcrossShadow(parent);
       }
     }
     targets.push(content.document.activeElement, content.document.body, content.document.documentElement);
@@ -4094,7 +4462,7 @@ var ZoteroAIReading = {
       ) {
         return true;
       }
-      current = current.parentElement;
+      current = parentAcrossShadow(current);
     }
     return false;
   }
@@ -4125,9 +4493,31 @@ var ZoteroAIReading = {
     });
   }
 
+  function hasSelectedInputFile(fileName) {
+    try {
+      const expectedName = normalize(fileName);
+      for (const input of queryRoots(collectOpenRoots(), "input[type='file']")) {
+        for (const file of Array.from(input.files || [])) {
+          if (normalize(file && file.name) === expectedName) {
+            return true;
+          }
+        }
+      }
+    }
+    catch (_) {}
+    return false;
+  }
+
   function hasAttachment(fileName) {
     const needles = buildNeedles(fileName);
+    const roots = collectOpenRoots();
     const selectors = [
+      "[data-filename]",
+      "[data-file-name]",
+      "[data-file-id]",
+      "[data-attachment-id]",
+      "[data-testid*='file']",
+      "[data-testid*='attach']",
       "[class*='file']",
       "[class*='File']",
       "[class*='attach']",
@@ -4136,14 +4526,16 @@ var ZoteroAIReading = {
       "[class*='Upload']",
       "[class*='document']",
       "[class*='Document']",
+	  "[aria-label]",
       "[title]",
       "button",
-      "span",
-      "div"
+      "a",
+      "[role='button']",
+      "[role='listitem']"
     ];
     for (const selector of selectors) {
       try {
-        for (const element of content.document.querySelectorAll(selector)) {
+        for (const element of queryRoots(roots, selector)) {
           if (!isVisible(element)) {
             continue;
           }
@@ -4174,7 +4566,7 @@ var ZoteroAIReading = {
     return false;
   }
 
-	  function tryUpload(pdfPath, preparedUI) {
+	  function tryUpload(pdfPath, state) {
 	    const fileName = getFileName(pdfPath);
 	    const inputs = findFileInputs();
 	    let attempted = false;
@@ -4184,9 +4576,17 @@ var ZoteroAIReading = {
 	        break;
 	      }
 	    }
-	    if (!attempted && !preparedUI && openChatGLMUploadUI()) {
-	      content.setTimeout(() => tryUpload(pdfPath, true), 350);
+	    if (attempted && hasSelectedInputFile(fileName)) {
+	      sendAsyncMessage(replyName, { ok: true, reason: "input-selected", inputCount: inputs.length });
 	      return;
+	    }
+	    if (!attempted && state.allowUIClick) {
+	      prepareUploadUI(state);
+	      if (state.attemptsLeft > 0) {
+	        state.attemptsLeft -= 1;
+	        content.setTimeout(() => tryUpload(pdfPath, state), state.retryDelay);
+	        return;
+	      }
 	    }
 	    if (!attempted) {
 	      attempted = dispatchFileDropAndPaste(pdfPath);
@@ -4207,9 +4607,10 @@ var ZoteroAIReading = {
 	  function waitAndUpload(pdfPath, attemptsLeft) {
 	    const editor = findEditor();
 	    const inputs = findFileInputs();
-	    if (editor || inputs.length) {
+	    const preparationState = getUploadPreparationState();
+	    if (editor || inputs.length || preparationState.allowUIClick) {
 	      focusEditor(editor);
-	      tryUpload(pdfPath, false);
+	      tryUpload(pdfPath, preparationState);
 	      return true;
 	    }
     if (attemptsLeft > 0) {
@@ -4345,6 +4746,54 @@ var ZoteroAIReading = {
   const messageName = ${JSON.stringify(messageName)};
   const replyName = ${JSON.stringify(replyName)};
 
+  function querySelectorAllDeep(root, selector) {
+    const results = [];
+    const queue = [root];
+    const visited = new Set();
+    while (queue.length) {
+      const current = queue.shift();
+      if (!current || visited.has(current) || !current.querySelectorAll) {
+        continue;
+      }
+      visited.add(current);
+      try {
+        for (const element of current.querySelectorAll(selector)) {
+          results.push(element);
+        }
+      }
+      catch (_) {}
+      try {
+        for (const element of current.querySelectorAll("*")) {
+          if (element.shadowRoot) {
+            queue.push(element.shadowRoot);
+          }
+        }
+      }
+      catch (_) {}
+    }
+    return results;
+  }
+
+  function isEditorEnabled(element) {
+    let current = element;
+    for (let depth = 0; current && depth < 6; depth++) {
+      const contentEditable = String(current.getAttribute && current.getAttribute("contenteditable") || "").toLowerCase();
+      if (
+        current.disabled ||
+        current.readOnly ||
+        current.hasAttribute && (current.hasAttribute("readonly") || current.hasAttribute("inert")) ||
+        contentEditable === "false" ||
+        String(current.getAttribute && current.getAttribute("aria-disabled") || "").toLowerCase() === "true" ||
+        String(current.getAttribute && current.getAttribute("data-disabled") || "").toLowerCase() === "true"
+      ) {
+        return false;
+      }
+      const nodeRoot = current.getRootNode && current.getRootNode();
+      current = current.parentElement || (nodeRoot && nodeRoot.host) || null;
+    }
+    return true;
+  }
+
   function isVisible(element) {
     if (!element || !element.getBoundingClientRect) {
       return false;
@@ -4423,11 +4872,7 @@ var ZoteroAIReading = {
       "[aria-label*='ask']",
       "[aria-label*='输入']",
       "[placeholder]",
-      "div.ProseMirror[contenteditable='true']",
       "div[role='textbox'][contenteditable='true']",
-      "div[role='textbox']",
-      "[role='textbox']",
-      "[contenteditable]",
       "[contenteditable='true']",
       "textarea",
       "input[type='text']",
@@ -4436,9 +4881,9 @@ var ZoteroAIReading = {
     const candidates = [];
     for (const selector of selectors) {
       try {
-        for (const element of doc.querySelectorAll(selector)) {
+        for (const element of querySelectorAllDeep(doc, selector)) {
           const editor = normalizeEditor(element);
-          if (editor && isVisible(editor)) {
+          if (editor && isVisible(editor) && isEditorEnabled(editor) && !candidates.includes(editor)) {
             candidates.push(editor);
           }
         }
@@ -4575,6 +5020,50 @@ var ZoteroAIReading = {
     return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
   }
 
+  function collectOpenRoots() {
+    const roots = [];
+    const queue = [content.document];
+    const visited = new Set();
+    while (queue.length) {
+      const root = queue.shift();
+      if (!root || visited.has(root) || !root.querySelectorAll) {
+        continue;
+      }
+      visited.add(root);
+      roots.push(root);
+      try {
+        for (const element of root.querySelectorAll("*")) {
+          if (element.shadowRoot) {
+            queue.push(element.shadowRoot);
+          }
+        }
+      }
+      catch (_) {}
+    }
+    return roots;
+  }
+
+  function queryRoots(roots, selector) {
+    const results = [];
+    for (const root of roots) {
+      try {
+        for (const element of root.querySelectorAll(selector)) {
+          results.push(element);
+        }
+      }
+      catch (_) {}
+    }
+    return results;
+  }
+
+  function parentAcrossShadow(element) {
+    if (!element) {
+      return null;
+    }
+    const root = element.getRootNode && element.getRootNode();
+    return element.parentElement || (root && root.host) || null;
+  }
+
   function getVisibleText(element) {
     if (!element) {
       return "";
@@ -4638,7 +5127,7 @@ var ZoteroAIReading = {
       ) {
         return true;
       }
-      current = current.parentElement;
+      current = parentAcrossShadow(current);
     }
     return false;
   }
@@ -4658,6 +5147,7 @@ var ZoteroAIReading = {
 
   function hasAttachment(fileName) {
     const needles = buildNeedles(fileName);
+    const roots = collectOpenRoots();
     const selectors = [
       "[data-filename]",
       "[data-file-name]",
@@ -4674,7 +5164,7 @@ var ZoteroAIReading = {
     ];
     for (const selector of selectors) {
       try {
-        for (const element of content.document.querySelectorAll(selector)) {
+        for (const element of queryRoots(roots, selector)) {
           if (!isVisible(element)) {
             continue;
           }
@@ -4706,7 +5196,11 @@ var ZoteroAIReading = {
 
   addMessageListener(messageName, function onMessage(message) {
     removeMessageListener(messageName, onMessage);
-    waitForAttachment(String(message && message.data && message.data.fileName || ""), 64);
+    const requestedAttempts = Number(message && message.data && message.data.attempts);
+    const attempts = Number.isFinite(requestedAttempts)
+      ? Math.max(0, Math.min(64, Math.floor(requestedAttempts)))
+      : 64;
+    waitForAttachment(String(message && message.data && message.data.fileName || ""), attempts);
   });
 })();
 `;
@@ -4730,6 +5224,70 @@ var ZoteroAIReading = {
     return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
   }
 
+  function collectOpenRoots() {
+    const roots = [];
+    const queue = [content.document];
+    const visited = new Set();
+    while (queue.length) {
+      const root = queue.shift();
+      if (!root || visited.has(root) || !root.querySelectorAll) {
+        continue;
+      }
+      visited.add(root);
+      roots.push(root);
+      try {
+        for (const element of root.querySelectorAll("*")) {
+          if (element.shadowRoot) {
+            queue.push(element.shadowRoot);
+          }
+        }
+      }
+      catch (_) {}
+    }
+    return roots;
+  }
+
+  function queryRoots(roots, selector) {
+    const results = [];
+    for (const root of roots) {
+      try {
+        for (const element of root.querySelectorAll(selector)) {
+          results.push(element);
+        }
+      }
+      catch (_) {}
+    }
+    return results;
+  }
+
+  function parentAcrossShadow(element) {
+    if (!element) {
+      return null;
+    }
+    const root = element.getRootNode && element.getRootNode();
+    return element.parentElement || (root && root.host) || null;
+  }
+
+  function isEditorEnabled(element) {
+    let current = element;
+    for (let depth = 0; current && depth < 6; depth++) {
+      const contentEditable = String(current.getAttribute && current.getAttribute("contenteditable") || "").toLowerCase();
+      if (
+        current.disabled ||
+        current.readOnly ||
+        current.hasAttribute && (current.hasAttribute("readonly") || current.hasAttribute("inert")) ||
+        contentEditable === "false" ||
+        String(current.getAttribute && current.getAttribute("aria-disabled") || "").toLowerCase() === "true" ||
+        String(current.getAttribute && current.getAttribute("data-disabled") || "").toLowerCase() === "true"
+      ) {
+        return false;
+      }
+      const root = current.getRootNode && current.getRootNode();
+      current = current.parentElement || (root && root.host) || null;
+    }
+    return true;
+  }
+
 	  function normalizeEditor(element) {
 	    if (!element) {
 	      return null;
@@ -4738,7 +5296,10 @@ var ZoteroAIReading = {
 	    if (element.isContentEditable || tag === "textarea" || tag === "input") {
 	      return element;
 	    }
-	    return element.querySelector("textarea, input[type='text'], input:not([type]), [contenteditable], [role='textbox']");
+	    return querySelectorAllDeep(
+	      element.shadowRoot || element,
+	      "textarea, input[type='text'], input:not([type]), [contenteditable='true'], [role='textbox'][contenteditable='true']"
+	    )[0] || null;
 	  }
 
 	  function querySelectorAllDeep(root, selector) {
@@ -4844,7 +5405,7 @@ var ZoteroAIReading = {
 	      try {
 	        for (const element of querySelectorAllDeep(doc, selector)) {
 	          const editor = normalizeEditor(element);
-	          if (editor && isVisible(editor)) {
+	          if (editor && isVisible(editor) && isEditorEnabled(editor) && !candidates.includes(editor)) {
             candidates.push(editor);
           }
         }
@@ -4873,29 +5434,21 @@ var ZoteroAIReading = {
 
   function dispatchTextEvents(editor, text) {
     try {
-      editor.dispatchEvent(new content.InputEvent("beforeinput", {
-        bubbles: true,
-        cancelable: true,
-        inputType: "insertText",
-        data: text
-      }));
-    }
-    catch (_) {}
-    try {
       editor.dispatchEvent(new content.InputEvent("input", {
         bubbles: true,
+        composed: true,
         inputType: "insertText",
         data: text
       }));
     }
     catch (_) {
       try {
-        editor.dispatchEvent(new content.Event("input", { bubbles: true }));
+        editor.dispatchEvent(new content.Event("input", { bubbles: true, composed: true }));
       }
       catch (_) {}
     }
     try {
-      editor.dispatchEvent(new content.Event("change", { bubbles: true }));
+      editor.dispatchEvent(new content.Event("change", { bubbles: true, composed: true }));
     }
     catch (_) {}
   }
@@ -4927,6 +5480,20 @@ var ZoteroAIReading = {
     catch (_) {}
   }
 
+  function normalizeText(value) {
+    return String(value || "").replace(/\\u00a0/g, " ").replace(/\\s+/g, " ").trim();
+  }
+
+  function editorContainsText(editor, text) {
+    if (!editor) {
+      return false;
+    }
+    const tag = String(editor.tagName || "").toLowerCase();
+    const current = tag === "textarea" || tag === "input" ? editor.value : editor.textContent;
+    const expected = normalizeText(text);
+    return Boolean(expected) && normalizeText(current).includes(expected);
+  }
+
   function insertText(editor, text) {
     focusEditor(editor);
     const tag = String(editor.tagName || "").toLowerCase();
@@ -4936,15 +5503,16 @@ var ZoteroAIReading = {
       return true;
     }
 
-    placeCaretAtEnd(editor);
     try {
-      editor.textContent = "";
-      placeCaretAtEnd(editor);
+      const range = editor.ownerDocument.createRange();
+      range.selectNodeContents(editor);
+      const selection = content.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
     }
     catch (_) {}
     try {
       if (content.document.execCommand("insertText", false, text)) {
-        dispatchTextEvents(editor, text);
         return true;
       }
     }
@@ -4964,7 +5532,32 @@ var ZoteroAIReading = {
   function waitAndInsert(text, attemptsLeft) {
     const editor = findEditor();
     if (editor) {
-      sendAsyncMessage(replyName, { ok: insertText(editor, text) });
+      if (editorContainsText(editor, text)) {
+        sendAsyncMessage(replyName, { ok: true, reason: "already-present" });
+        return true;
+      }
+      if (!insertText(editor, text)) {
+        sendAsyncMessage(replyName, { ok: false, reason: "insert-failed" });
+        return false;
+      }
+      content.setTimeout(() => {
+        const firstEditor = findEditor() || editor;
+        if (!editorContainsText(firstEditor, text)) {
+          sendAsyncMessage(replyName, { ok: false, reason: "text-not-retained" });
+          return;
+        }
+        // Controlled editors such as Claude's ProseMirror may restore framework
+        // state after a short-lived DOM mutation. Require a second, later readback
+        // before treating a synthetic insert as successful.
+        content.setTimeout(() => {
+          const stableEditor = findEditor() || firstEditor;
+          const stable = editorContainsText(stableEditor, text);
+          sendAsyncMessage(replyName, {
+            ok: stable,
+            reason: stable ? "verified-stable" : "text-not-retained"
+          });
+        }, 800);
+      }, 200);
       return true;
     }
     if (attemptsLeft > 0) {
@@ -5002,14 +5595,38 @@ var ZoteroAIReading = {
     return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
   }
 
+  function isEditorEnabled(element) {
+    let current = element;
+    for (let depth = 0; current && depth < 6; depth++) {
+      const contentEditable = String(current.getAttribute && current.getAttribute("contenteditable") || "").toLowerCase();
+      if (
+        current.disabled ||
+        current.readOnly ||
+        current.hasAttribute && (current.hasAttribute("readonly") || current.hasAttribute("inert")) ||
+        contentEditable === "false" ||
+        String(current.getAttribute && current.getAttribute("aria-disabled") || "").toLowerCase() === "true" ||
+        String(current.getAttribute && current.getAttribute("data-disabled") || "").toLowerCase() === "true"
+      ) {
+        return false;
+      }
+      const root = current.getRootNode && current.getRootNode();
+      current = current.parentElement || (root && root.host) || null;
+    }
+    return true;
+  }
+
 	  function normalizeEditor(element) {
 	    if (!element) {
 	      return null;
 	    }
-	    if (element.isContentEditable || ["textarea", "input"].includes(String(element.tagName || "").toLowerCase())) {
+	    const tag = String(element.tagName || "").toLowerCase();
+	    if (element.isContentEditable || tag === "textarea" || tag === "input") {
 	      return element;
 	    }
-	    return element.querySelector("textarea, input[type='text'], input:not([type]), [contenteditable], [role='textbox']");
+	    return querySelectorAllDeep(
+	      element.shadowRoot || element,
+	      "textarea, input[type='text'], input:not([type]), [contenteditable='true'], [role='textbox'][contenteditable='true']"
+	    )[0] || null;
 	  }
 
 	  function querySelectorAllDeep(root, selector) {
@@ -5115,7 +5732,7 @@ var ZoteroAIReading = {
 	      try {
 	        for (const element of querySelectorAllDeep(doc, selector)) {
 	          const editor = normalizeEditor(element);
-	          if (editor && isVisible(editor)) {
+	          if (editor && isVisible(editor) && isEditorEnabled(editor) && !candidates.includes(editor)) {
             candidates.push(editor);
           }
         }
@@ -5176,10 +5793,12 @@ var ZoteroAIReading = {
 `;
   },
 
-  getClaudeEditorFocusFrameScript(messageName) {
+  getClaudeEditorFocusFrameScript(messageName, replyName = "", attempts = 12) {
     return `
 (function() {
   const messageName = ${JSON.stringify(messageName)};
+  const replyName = ${JSON.stringify(replyName)};
+  const maxAttempts = ${Math.max(0, Number(attempts) || 12)};
 
   function isVisible(element) {
     if (!element || !element.getBoundingClientRect) {
@@ -5193,14 +5812,66 @@ var ZoteroAIReading = {
     return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
   }
 
+  function querySelectorAllDeep(root, selector) {
+    const results = [];
+    const queue = [root];
+    const visited = new Set();
+    while (queue.length) {
+      const current = queue.shift();
+      if (!current || visited.has(current) || !current.querySelectorAll) {
+        continue;
+      }
+      visited.add(current);
+      try {
+        for (const element of current.querySelectorAll(selector)) {
+          results.push(element);
+        }
+      }
+      catch (_) {}
+      try {
+        for (const element of current.querySelectorAll("*")) {
+          if (element.shadowRoot) {
+            queue.push(element.shadowRoot);
+          }
+        }
+      }
+      catch (_) {}
+    }
+    return results;
+  }
+
+  function isEditorEnabled(element) {
+    let current = element;
+    for (let depth = 0; current && depth < 6; depth++) {
+      const contentEditable = String(current.getAttribute && current.getAttribute("contenteditable") || "").toLowerCase();
+      if (
+        current.disabled ||
+        current.readOnly ||
+        current.hasAttribute && (current.hasAttribute("readonly") || current.hasAttribute("inert")) ||
+        contentEditable === "false" ||
+        String(current.getAttribute && current.getAttribute("aria-disabled") || "").toLowerCase() === "true" ||
+        String(current.getAttribute && current.getAttribute("data-disabled") || "").toLowerCase() === "true"
+      ) {
+        return false;
+      }
+      const root = current.getRootNode && current.getRootNode();
+      current = current.parentElement || (root && root.host) || null;
+    }
+    return true;
+  }
+
   function normalizeEditor(element) {
     if (!element) {
       return null;
     }
-    if (element.isContentEditable || ["textarea", "input"].includes(String(element.tagName || "").toLowerCase())) {
+    const tag = String(element.tagName || "").toLowerCase();
+    if (element.isContentEditable || tag === "textarea" || tag === "input") {
       return element;
     }
-    return element.querySelector("textarea, input[type='text'], input:not([type]), [contenteditable], [role='textbox']");
+    return querySelectorAllDeep(
+      element.shadowRoot || element,
+      "textarea, input[type='text'], input:not([type]), [contenteditable='true'], [role='textbox'][contenteditable='true']"
+    )[0] || null;
   }
 
   function getEditorHint(element) {
@@ -5245,6 +5916,11 @@ var ZoteroAIReading = {
   function findEditor() {
     const doc = content.document;
     const selectors = [
+      "[data-testid='chat-input'] .ProseMirror[contenteditable='true']",
+      ".ProseMirror[contenteditable='true']",
+      ".ql-editor[contenteditable='true']",
+      "rich-textarea [contenteditable='true']",
+      "[aria-label*='Gemini'][contenteditable='true']",
       "[data-testid='chat-input']",
       "[data-testid*='chat-input']",
       "[data-testid*='input']",
@@ -5271,9 +5947,9 @@ var ZoteroAIReading = {
     const candidates = [];
     for (const selector of selectors) {
       try {
-        for (const element of doc.querySelectorAll(selector)) {
+        for (const element of querySelectorAllDeep(doc, selector)) {
           const editor = normalizeEditor(element);
-          if (editor && isVisible(editor)) {
+          if (editor && isVisible(editor) && isEditorEnabled(editor) && !candidates.includes(editor)) {
             candidates.push(editor);
           }
         }
@@ -5282,6 +5958,25 @@ var ZoteroAIReading = {
     }
     candidates.sort((a, b) => scoreEditor(b) - scoreEditor(a));
     return candidates[0] || null;
+  }
+
+  function getDeepActiveElement() {
+    let active = content.document.activeElement;
+    while (active && active.shadowRoot && active.shadowRoot.activeElement) {
+      active = active.shadowRoot.activeElement;
+    }
+    return active;
+  }
+
+  function hasEditorFocus(editor) {
+    const active = getDeepActiveElement();
+    return Boolean(active && (active === editor || editor.contains(active)));
+  }
+
+  function sendFocusResult(focused) {
+    if (replyName) {
+      sendAsyncMessage(replyName, { focused: Boolean(focused) });
+    }
   }
 
   function focusEditor(attemptsLeft) {
@@ -5311,18 +6006,30 @@ var ZoteroAIReading = {
         }
         catch (_) {}
       }
+      content.setTimeout(() => {
+        if (hasEditorFocus(editor) && isEditorEnabled(editor)) {
+          sendFocusResult(true);
+          return;
+        }
+        if (attemptsLeft > 0) {
+          focusEditor(attemptsLeft - 1);
+          return;
+        }
+        sendFocusResult(false);
+      }, 80);
       return true;
     }
     if (attemptsLeft > 0) {
       content.setTimeout(() => focusEditor(attemptsLeft - 1), 250);
       return true;
     }
+    sendFocusResult(false);
     return false;
   }
 
   addMessageListener(messageName, function onMessage() {
     removeMessageListener(messageName, onMessage);
-    focusEditor(12);
+    focusEditor(maxAttempts);
   });
 })();
 `;
@@ -5424,7 +6131,14 @@ var ZoteroAIReading = {
         let callback = () => {
           try {
             if (options.prompt) {
+              let useLegacyReaderPanePaste =
+                options.readerPaneReader &&
+                this.shouldUseLegacyReaderPanePaste(options.readerPaneReader, options);
               let pastePrompt = () => {
+                if (useLegacyReaderPanePaste) {
+                  this.pasteTextClipboardIntoLegacyReaderPane(options.readerPaneReader, options.prompt, 300);
+                  return;
+                }
                 if (options.readerPaneReader && this.isGeminiURL(aiURL)) {
                   this.pasteTextIntoReaderPaneEditorOrClipboard(options.readerPaneReader, options.prompt, 300);
                   return;
@@ -5433,7 +6147,11 @@ var ZoteroAIReading = {
                 pasteNow(false);
               };
               if (options.readerPaneReader && options.pdfPath) {
-                this.pastePromptAfterReaderPanePDFAttachment(
+                let waitForAttachment = useLegacyReaderPanePaste
+                  ? this.pastePromptAfterLegacyReaderPanePDFAttachment
+                  : this.pastePromptAfterReaderPanePDFAttachment;
+                waitForAttachment.call(
+                  this,
                   options.readerPaneReader,
                   options.pdfPath,
                   pastePrompt,
@@ -5540,6 +6258,16 @@ var ZoteroAIReading = {
     try {
       let host = new URL(String(aiURL || "")).hostname;
       return host === "gemini.google.com" || host.endsWith(".gemini.google.com");
+    }
+    catch (_) {
+      return false;
+    }
+  },
+
+  isDeepSeekURL(aiURL) {
+    try {
+      let host = new URL(String(aiURL || "")).hostname;
+      return host === "chat.deepseek.com" || host.endsWith(".chat.deepseek.com");
     }
     catch (_) {
       return false;

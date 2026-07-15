@@ -69,7 +69,7 @@ PDF file mode depends on the target web AI page accepting pasted files. For reli
 
 Download the current XPI from GitHub:
 
-[zotero-ai-reading-0.4.136.xpi](https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/windows/dist/zotero-ai-reading-0.4.136.xpi)
+[zotero-ai-reading-0.4.141.xpi](https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/windows/dist/zotero-ai-reading-0.4.141.xpi)
 
 Then install it from Zotero:
 
