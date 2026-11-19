@@ -12,5 +12,6 @@ dist/*
 !dist/
 !dist/zotero-ai-reading-0.4.136.xpi
 !dist/zotero-ai-reading-0.4.141.xpi
+!dist/zotero-ai-reading-0.4.142.xpi
 
 node_modules/

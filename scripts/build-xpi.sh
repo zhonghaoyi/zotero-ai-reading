@@ -15,6 +15,7 @@ zip -X -r "$XPI_PATH" \
   bootstrap.js \
   prefs.js \
   zotero-ai-reading.js \
+  scripts/paste-chatgpt-windows.ps1 \
   preferences.xhtml \
   icons/icon.png
 

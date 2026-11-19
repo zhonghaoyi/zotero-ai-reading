@@ -17,6 +17,7 @@ $Entries = @(
   @{ Source = "bootstrap.js"; Entry = "bootstrap.js" },
   @{ Source = "prefs.js"; Entry = "prefs.js" },
   @{ Source = "zotero-ai-reading.js"; Entry = "zotero-ai-reading.js" },
+  @{ Source = "scripts\paste-chatgpt-windows.ps1"; Entry = "scripts/paste-chatgpt-windows.ps1" },
   @{ Source = "preferences.xhtml"; Entry = "preferences.xhtml" },
   @{ Source = "icons\icon.png"; Entry = "icons/icon.png" }
 )

@@ -3,9 +3,9 @@
     "zoteroaireading@zhonghaoyi.dev": {
       "updates": [
         {
-          "version": "0.4.141",
-          "update_link": "https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/windows/dist/zotero-ai-reading-0.4.141.xpi",
-          "update_hash": "sha256:dfc03dd9d3114a634b653cd488c938ef07a37f347f57032121a733ce4049e1c2",
+          "version": "0.4.142",
+          "update_link": "https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/windows/dist/zotero-ai-reading-0.4.142.xpi",
+          "update_hash": "sha256:46bf624131de497abc7700eefab3ea9cd0f6a5b2ef83b98676ef7c525853514a",
           "applications": {
             "zotero": {
               "strict_min_version": "7.0",

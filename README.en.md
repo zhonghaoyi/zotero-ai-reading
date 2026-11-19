@@ -69,7 +69,7 @@ PDF file mode depends on the target web AI page accepting pasted files. For reli
 
 Download the current XPI from GitHub:
 
-[zotero-ai-reading-0.4.141.xpi](https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/windows/dist/zotero-ai-reading-0.4.141.xpi)
+[zotero-ai-reading-0.4.142.xpi](https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/windows/dist/zotero-ai-reading-0.4.142.xpi)
 
 Then install it from Zotero:
 
@@ -115,6 +115,8 @@ If `{pdfText}` is omitted and the transfer mode includes PDF text, the plugin ap
 
 PDF file mode is an independent transfer mode. With auto-paste enabled, the plugin pastes the selected local PDF file first, then pastes the fixed PDF-file prompt plus your saved extra prompt. With auto-paste disabled, the PDF file is left on the clipboard for manual paste.
 
+When sending a PDF to ChatGPT in an external Windows browser, keep the target tab in the foreground. The plugin waits for the composer, pastes the PDF, and inserts the prompt after the attachment filename appears. If attachment confirmation times out, check the composer before pasting the file manually. To use Zotero instead, enable the right-side reader pane and use the item context menu.
+
 ## License
 
 MIT

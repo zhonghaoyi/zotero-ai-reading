@@ -69,7 +69,7 @@ PDF 文件模式依赖目标网页 AI 是否接受粘贴文件。如果需要跨
 
 从 GitHub 下载当前 XPI：
 
-[zotero-ai-reading-0.4.141.xpi](https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/windows/dist/zotero-ai-reading-0.4.141.xpi)
+[zotero-ai-reading-0.4.142.xpi](https://raw.githubusercontent.com/zhonghaoyi/zotero-ai-reading/windows/dist/zotero-ai-reading-0.4.142.xpi)
 
 然后在 Zotero 中安装：
 
@@ -115,6 +115,8 @@ zoteroaireading@zhonghaoyi.dev
 
 PDF 文件模式是一个独立传输模式。开启自动粘贴时，插件会先粘贴本地 PDF 文件，再粘贴固定 PDF 文件提示词和用户追加提示词。关闭自动粘贴时，PDF 文件会保留在剪贴板中，用户可以手动粘贴。
 
+在 Windows 外部浏览器中使用 ChatGPT 时，请保持目标标签页在前台。插件会等待输入框就绪，粘贴 PDF，并在页面显示附件文件名后填入提示词。如果插件提示未能确认附件，请先检查输入框旁是否已有文件，再决定是否手动粘贴。要在 Zotero 内打开，可勾选“阅读器右侧面板打开”，然后使用条目右键菜单。
+
 ## 许可证
 
 MIT

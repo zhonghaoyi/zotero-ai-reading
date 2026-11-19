@@ -772,8 +772,14 @@ var ZoteroAIReading = {
 
   async runFromWindow(window) {
     try {
+      this.clearPasteTimers();
       let aiURL = this.getAIURL();
       let { item, attachment, pdfPath } = await this.getSelectedPDF(window);
+      if (this.getBoolPref("openInReaderPane")) {
+        let reader = await this.openReaderForAttachment(attachment);
+        await this.runFromReader(reader, { openInReaderPane: true });
+        return;
+      }
       let shouldOpenAIPage = this.getBoolPref("openAIPage");
       if (shouldOpenAIPage) {
         Zotero.launchURL(aiURL);
@@ -784,7 +790,7 @@ var ZoteroAIReading = {
       let uploadPDFPath = transferMode === "file" ? this.preparePDFUploadPath(pdfPath, attachment) : pdfPath;
 
       if (this.getBoolPref("autoPaste") && this.isAutoPasteTarget(aiURL)) {
-        this.scheduleAutoPaste(aiURL, { pdfPath: uploadPDFPath, prompt, transferMode });
+        this.scheduleAutoPaste(aiURL, { pdfPath: uploadPDFPath, prompt, transferMode, useCurrentConversation: !shouldOpenAIPage });
       }
       else if (transferMode === "file") {
         this.copyPDFFileToClipboardAsync(uploadPDFPath);
@@ -817,8 +823,11 @@ var ZoteroAIReading = {
             forceNewConversation: Boolean(options.forceNewConversation)
           });
           openedInReaderPane = Boolean(readerPaneResult?.opened || readerPaneResult === true);
+          if (!openedInReaderPane) {
+            throw new Error("无法在当前 PDF 的阅读器右侧打开 Web AI。请重新打开该 PDF 后再试。");
+          }
         }
-        if (!openedInReaderPane) {
+        else {
           Zotero.launchURL(aiURL);
         }
       }
@@ -848,7 +857,10 @@ var ZoteroAIReading = {
             transferMode,
             aiURL
           });
-          if (transferMode !== "file") {
+          if (transferMode === "file" && !shouldAutoPaste) {
+            this.copyPDFFileToClipboardAsync(uploadPDFPath);
+          }
+          else if (transferMode !== "file") {
             this.copyToClipboard(prompt);
           }
         }
@@ -887,7 +899,7 @@ var ZoteroAIReading = {
           }
         }
         else {
-          this.scheduleAutoPaste(aiURL, { pdfPath: uploadPDFPath, prompt, transferMode });
+          this.scheduleAutoPaste(aiURL, { pdfPath: uploadPDFPath, prompt, transferMode, useCurrentConversation: !shouldOpenAIPage });
         }
       }
     }
@@ -1052,29 +1064,18 @@ var ZoteroAIReading = {
     }
   },
 
-  findReaderForAttachment(attachment) {
-    let readers = this.getOpenReaders();
-    let exact = readers.find((reader) => {
-      try {
-        return reader?._item?.id === attachment?.id;
-      }
-      catch (_) {
-        return false;
-      }
-    });
-    if (exact) {
-      return exact;
+  async openReaderForAttachment(attachment) {
+    let reader = await Zotero.Reader.open(attachment.id);
+    // Selecting an unloaded reader tab can return before its reader is created.
+    for (let i = 0; !reader && i < 50; i++) {
+      reader = this.getOpenReaders().find(candidate => candidate.itemID === attachment.id);
+      if (!reader) await Zotero.Promise.delay(100);
     }
-    return readers.length === 1 ? readers[0] : null;
-  },
-
-  async openAIInReaderPaneForAttachment(attachment, aiURL, options = {}) {
-    let reader = this.findReaderForAttachment(attachment);
-    if (!reader) {
-      return false;
+    if ((reader?.itemID ?? reader?._item?.id) !== attachment.id) {
+      throw new Error("无法打开所选 PDF 的 Zotero 阅读器。");
     }
-    let result = await this.openAIInReaderPane(reader, aiURL, options);
-    return Boolean(result?.opened || result === true);
+    await reader._initPromise;
+    return reader;
   },
 
   async openAIInReaderPane(reader, aiURL, options = {}) {
@@ -1528,6 +1529,7 @@ var ZoteroAIReading = {
     let external = makeXUL("button", "");
     external.setAttribute("label", "外部打开");
     external.addEventListener("click", () => {
+      this.clearPasteTimers();
       let frame = this.getReaderPaneWebView(pane);
       let baseURL = pane?.getAttribute?.("data-zai-ai-base-url") || this.getAIURL();
       let src = this.getWebViewCurrentURL(frame) || frame?.getAttribute("src") || baseURL;
@@ -6080,6 +6082,7 @@ var ZoteroAIReading = {
   },
 
   clearPasteTimers() {
+    this.cancelWindowsChatGPTTransfer();
     for (let timer of this.pasteTimers) {
       try {
         timer.cancel();
@@ -6091,10 +6094,84 @@ var ZoteroAIReading = {
 
   pasteIntoBrowser(aiURL, options = {}) {
     try {
+      if (this.isWindows() && options.transferMode === "file" && this.isChatGPTWebURL(aiURL)) {
+        return this.pastePDFIntoWindowsChatGPT(aiURL, options);
+      }
       this.pasteWithOptions(aiURL, false, options);
     }
     catch (error) {
       this.log("pasteIntoBrowser failed: " + (error.stack || error.message || String(error)));
+    }
+  },
+
+  isChatGPTWebURL(value) {
+    try {
+      let url = new URL(value);
+      return url.protocol === "https:" && ["chatgpt.com", "www.chatgpt.com", "chat.openai.com"].includes(url.hostname);
+    }
+    catch (_) {
+      return false;
+    }
+  },
+
+  cancelWindowsChatGPTTransfer() {
+    let job = this.windowsChatGPTTransfer;
+    this.windowsChatGPTTransfer = null;
+    job?.process?.kill().catch(error => this.log("Stopping Windows paste helper: " + error));
+  },
+
+  async pastePDFIntoWindowsChatGPT(aiURL, { pdfPath, prompt, useCurrentConversation = false }) {
+    this.cancelWindowsChatGPTTransfer();
+    let job = {};
+    this.windowsChatGPTTransfer = job;
+    try {
+      // Keep a native file drop available for manual paste if the page never becomes ready.
+      this.copyPDFFileToZoteroClipboard(pdfPath);
+      let resourceURI = Services.io.newURI(this.rootURI + "scripts/paste-chatgpt-windows.ps1");
+      let channel = Services.io.newChannelFromURI(resourceURI, null,
+        Services.scriptSecurityManager.getSystemPrincipal(), null,
+        Ci.nsILoadInfo.SEC_ALLOW_CROSS_ORIGIN_SEC_CONTEXT_IS_NULL, Ci.nsIContentPolicy.TYPE_OTHER);
+      let script = await Zotero.File.getContentsAsync(channel, "UTF-8");
+      let Subprocess;
+      try {
+        ({ Subprocess } = ChromeUtils.importESModule("resource://gre/modules/Subprocess.sys.mjs"));
+      }
+      catch (_) {
+        ({ Subprocess } = ChromeUtils.import("resource://gre/modules/Subprocess.jsm"));
+      }
+      if (this.windowsChatGPTTransfer !== job) return;
+      job.process = await Subprocess.call({
+        command: this.getWindowsPowerShellExecutable().path,
+        arguments: ["-NoProfile", "-NonInteractive", "-STA", "-WindowStyle", "Hidden",
+          "-EncodedCommand", this.encodePowerShellCommand(script)]
+      });
+      if (this.windowsChatGPTTransfer !== job) {
+        await job.process.kill();
+        return;
+      }
+      // Pass user data through stdin, including long prompts and non-ASCII filenames.
+      await job.process.stdin.write(JSON.stringify({ aiURL, pdfPath, prompt, useCurrentConversation }));
+      await job.process.stdin.close();
+      let { exitCode } = await job.process.wait();
+      if (exitCode === 0 || this.windowsChatGPTTransfer !== job) return;
+      let messages = {
+        2: "未找到可输入的 ChatGPT 对话框。请打开目标对话并登录，然后在输入框按 Ctrl+V 粘贴 PDF。",
+        3: "未能确认 ChatGPT 已显示 PDF 附件。请先检查输入框旁的附件，缺少时按 Ctrl+V 粘贴 PDF。",
+        4: "目标页面、输入焦点或剪贴板已改变，自动粘贴已停止。请检查附件后再试。",
+        5: "ChatGPT 已显示 PDF 附件。请在目标对话中补充提示词。"
+      };
+      throw new Error(messages[exitCode] || "无法自动附加 PDF。请在 ChatGPT 输入框中按 Ctrl+V 手动粘贴。");
+    }
+    catch (error) {
+      if (this.windowsChatGPTTransfer === job) {
+        this.log("Windows ChatGPT PDF transfer: " + error);
+        this.showError(this.getActiveWindow(), error);
+      }
+    }
+    finally {
+      if (this.windowsChatGPTTransfer === job) {
+        this.cancelWindowsChatGPTTransfer();
+      }
     }
   },
 
